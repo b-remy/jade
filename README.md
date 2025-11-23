@@ -1,4 +1,4 @@
-# joint-posterior
+# Joint Architecture for Density field and cosmology Estimates by posterior diffusion sampling
 Infering jointly cosmology and dark matter field from cosmic shear
 
 
