@@ -654,6 +654,15 @@ class JiT(nnx.Module):
         in_context_start=8,
         rngs=None
     ):
+        # Generate and split RNGs for different components
+        rng_keys = jax.random.split(rngs(), 6 + depth)  # 6 for components + depth for blocks
+        rngs_t_embedder = nnx.Rngs(rng_keys[0])
+        rngs_y_embedder = nnx.Rngs(rng_keys[1])
+        rngs_x_embedder = nnx.Rngs(rng_keys[2])
+        rngs_rope = nnx.Rngs(rng_keys[3])
+        rngs_final = nnx.Rngs(rng_keys[4])
+        rngs_blocks = [nnx.Rngs(rng_keys[5 + i]) for i in range(depth)]
+
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
@@ -665,12 +674,12 @@ class JiT(nnx.Module):
         self.num_classes = num_classes
         
         # Time and class embedders
-        self.t_embedder = TimestepEmbedder(hidden_size, rngs=rngs)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, rngs=rngs)
+        self.t_embedder = TimestepEmbedder(hidden_size, rngs=rngs_t_embedder)
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, rngs=rngs_y_embedder)
         
         # Patch embedding
         self.x_embedder = BottleneckPatchEmbed(
-            input_size, patch_size, in_channels, bottleneck_dim, hidden_size, bias=True, rngs=rngs
+            input_size, patch_size, in_channels, bottleneck_dim, hidden_size, bias=True, rngs=rngs_x_embedder
         )
         
         # Fixed sin-cos positional embeddings
@@ -698,7 +707,7 @@ class JiT(nnx.Module):
             dim=half_head_dim,
             pt_seq_len=hw_seq_len,
             num_cls_token=0,  # No extra tokens
-            rngs=rngs
+            rngs=rngs_rope
         )
         
         # RoPE WITH in-context tokens
@@ -706,7 +715,7 @@ class JiT(nnx.Module):
             dim=half_head_dim,
             pt_seq_len=hw_seq_len,
             num_cls_token=in_context_len,  # Add in-context tokens!
-            rngs=rngs
+            rngs=rngs_rope
         )
         
         # Transformer blocks - USE nnx.List instead of regular list
@@ -715,13 +724,13 @@ class JiT(nnx.Module):
                 hidden_size, num_heads, mlp_ratio=mlp_ratio,
                 attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
                 proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
-                rngs=rngs
+                rngs=rngs_blocks[i]
             )
             for i in range(depth)
         ])
         
         # Final layer
-        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, rngs=rngs)
+        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, rngs=rngs_final)
         
         self.initialize_weights()
     
