@@ -727,6 +727,40 @@ class JiT(nnx.Module):
     
     def initialize_weights(self):
         """Initialize weights following the PyTorch implementation."""
+        
+        # Initialize patch embedding convolutions (Xavier uniform)
+        w1 = self.x_embedder.proj1.kernel.value
+        w1_flat = w1.reshape(w1.shape[0], -1)
+        w1_init = jax.nn.initializers.xavier_uniform()(
+            jax.random.PRNGKey(0), w1_flat.shape
+        )
+        self.x_embedder.proj1.kernel.value = w1_init.reshape(w1.shape)
+        
+        w2 = self.x_embedder.proj2.kernel.value
+        w2_flat = w2.reshape(w2.shape[0], -1)
+        w2_init = jax.nn.initializers.xavier_uniform()(
+            jax.random.PRNGKey(1), w2_flat.shape
+        )
+        self.x_embedder.proj2.kernel.value = w2_init.reshape(w2.shape)
+        self.x_embedder.proj2.bias.value = jnp.zeros_like(self.x_embedder.proj2.bias.value)
+        
+        # Initialize label embedding table (normal with std=0.02)
+        key = jax.random.PRNGKey(2)
+        self.y_embedder.embedding_table.embedding.value = jax.random.normal(
+            key, self.y_embedder.embedding_table.embedding.value.shape
+        ) * 0.02
+        
+        # Initialize timestep embedder MLPs (normal with std=0.02)
+        key = jax.random.PRNGKey(3)
+        self.t_embedder.linear1.kernel.value = jax.random.normal(
+            key, self.t_embedder.linear1.kernel.value.shape
+        ) * 0.02
+        
+        key = jax.random.PRNGKey(4)
+        self.t_embedder.linear2.kernel.value = jax.random.normal(
+            key, self.t_embedder.linear2.kernel.value.shape
+        ) * 0.02
+        
         # Zero-out adaLN modulation layers in blocks
         for block in self.blocks:
             block.ada_linear.kernel.value = jnp.zeros_like(block.ada_linear.kernel.value)
