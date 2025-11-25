@@ -47,13 +47,10 @@ def setup_model(N=128, map_size=5, with_noise=False):
 
 def generate_batch(model, key, batch_size, with_noise=False):
     """Generate a batch of samples."""
-    (_, samples)= get_samples(
-        model,
-        key,
-        batch_size=batch_size,
-        with_noise=with_noise
-    )
     
+    sample_fn = partial(get_samples, model=model, batch_size=batch_size, with_noise=with_noise)
+    _, samples = jax.jit(sample_fn)(key=key)
+
     maps = samples['y']  # Shape: (batch_size, N, N) or (batch_size, nbins, N, N)
     theta = samples['theta']  # Shape: (batch_size, n_params)
     
