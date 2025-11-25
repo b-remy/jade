@@ -14,15 +14,21 @@ import numpy as np
 from jade.nn import JiT_B_16
 from datasets import load_from_disk
 from functools import partial
+
+import matplotlib.pyplot as plt
+
 # from utils import PATH, plot_ae_residuals, random_flip
 
-# import wandb
+import wandb
 
 from tqdm import tqdm
 
 def train():
 
-    # wandb.init(project="jade", entity="your_entity")
+    run = wandb.init(
+        project="jade", 
+        entity="b-remy"
+        )
 
     # Load dataset
     dataset = load_from_disk("lensing_dataset")
@@ -93,6 +99,7 @@ def train():
             # params, opt_state = update(params, opt_state, batch)
             keys, subkey = jax.random.split(key, 2)
             loss = train_step(model, optimizer, x, subkey)
+            run.log({"loss_train": loss})
 
         # Validation
         losses = []
@@ -101,8 +108,11 @@ def train():
             x_val = batch["map"]
             val_loss = loss_fn(params, x_val)
             losses.append(val_loss)
-        
+
         val_loss = np.mean(losses)
+        
+        run.log({"val_loss": val_loss})
+
         print(f"Epoch {epoch + 1}, Validation Loss: {val_loss}")
 
         # wandb.log({"epoch": epoch + 1, "val_loss": val_loss})
