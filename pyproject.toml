@@ -9,6 +9,10 @@ dependencies = [
     "jax>=0.8.1",
 ]
 
+
+[tool.setuptools]
+packages = ["jade"]
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.1.0",
