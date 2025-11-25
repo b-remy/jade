@@ -855,6 +855,6 @@ class JiT(nnx.Module):
 def JiT_B_16(rngs, **kwargs):
     return JiT(
         depth=12, hidden_size=768, num_heads=12,
-        bottleneck_dim=128, in_context_len=32, in_context_start=4,
+        bottleneck_dim=128, num_classes=1, in_context_len=0, in_context_start=0,
         patch_size=16, rngs=rngs, **kwargs
     )
