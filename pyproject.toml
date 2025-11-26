@@ -10,6 +10,7 @@ dependencies = [
     "einops>=0.8.1",
     "flax>=0.12.1",
     "jax>=0.8.1",
+    "matplotlib>=3.10.7",
     "wandb>=0.23.0",
 ]
 
