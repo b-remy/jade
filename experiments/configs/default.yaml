@@ -30,14 +30,14 @@ optimizer:
 
 # EMA configuration
 ema:
-  use_ema: true
+  use_ema: false
   decay: 0.9999
 
 # Diffusion configuration
 diffusion:
   sigma_min: 0.01
   sigma_max: 50.0
-  time_distribution: "uniform"  # or "beta"
+  time_distribution: "beta"  # or "uniform"
   beta_a: 3.0
   beta_b: 3.0
   weight_type: "inverse_sigma_squared_plus_one"

@@ -187,7 +187,8 @@ def train(cfg):
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
     # Create checkpoint directory
-    checkpoint_dir = os.path.abspath(cfg['checkpoint']['dir'])
+    # checkpoint_dir = os.path.abspath(cfg['checkpoint']['dir'])
+    checkpoint_dir = os.path.abspath(os.path.join(wandb.run.dir, 'checkpoints'))
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     checkpointer = ocp.PyTreeCheckpointer()
@@ -366,7 +367,6 @@ def train(cfg):
             "val/loss_total": val_loss,
             "val/loss_field": val_loss_x,
             "val/loss_cosmo": val_loss_cosmo,
-            "val/loss_ratio": val_loss_x / (val_loss_cosmo + 1e-8),
             "epoch": epoch + 1,
         })
 
