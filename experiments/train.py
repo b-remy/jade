@@ -141,6 +141,7 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
         )
 
     # Create checkpoint directory
+    checkpoint_dir = os.path.abspath(checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Setup Orbax checkpointer
@@ -150,6 +151,8 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
     # Load dataset
     dataset = load_from_disk("sbi_lens_lognormal")
     dataset = dataset.with_format("numpy")
+
+    dataset = dataset.train_test_split(test_size=0.9, seed=42)["train"]
 
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     
@@ -176,8 +179,39 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
 
     weight_fn = lambda t: 1 / sigma_fn(t)**2 + 1
 
-    def loss_fn(model, x, cosmo, key, train=True):
+    # def loss_fn(model, x, cosmo, key, train=True):
 
+    #     keys = jax.random.split(key, 3)
+
+    #     # sample time
+    #     t = jax.random.beta(keys[0], a=3, b=3, shape=x.shape[:1])
+    #     sigma_t = sigma_fn(t)
+        
+    #     # forward diffusion
+    #     z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
+    #     xt = x + z
+
+    #     zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
+    #     cosmot = cosmo + zc
+
+    #     model = jax.vmap(model, in_axes=(0,0,0,None))
+    #     x_pred, cosmo_pred = model(xt, cosmot, sigma_t, train)  
+
+    #     # Compute separate losses with proper normalization
+    #     loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))  # MSE per sample [batch]
+    #     loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)  # MSE per sample [batch]
+        
+    #     # Apply time weighting
+    #     weights = weight_fn(t)
+    #     weighted_loss_x = loss_x * weights
+    #     weighted_loss_cosmo = loss_cosmo * weights
+        
+    #     # Combined loss
+    #     total_loss = jnp.mean(weighted_loss_x + weighted_loss_cosmo)
+        
+    #     # Return total loss and unweighted individual components for logging
+    #     return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
+    def loss_fn(model, x, cosmo, key, train=True, return_components=False):
         keys = jax.random.split(key, 3)
 
         # sample time
@@ -194,30 +228,29 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
         model = jax.vmap(model, in_axes=(0,0,0,None))
         x_pred, cosmo_pred = model(xt, cosmot, sigma_t, train)  
 
-        # Compute separate losses with proper normalization
-        loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))  # MSE per sample [batch]
-        loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)  # MSE per sample [batch]
+        # Compute losses
+        loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
+        loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
         
         # Apply time weighting
         weights = weight_fn(t)
-        weighted_loss_x = loss_x * weights
-        weighted_loss_cosmo = loss_cosmo * weights
+        total_loss = jnp.mean((loss_x + loss_cosmo) * weights)
         
-        # Combined loss
-        total_loss = jnp.mean(weighted_loss_x + weighted_loss_cosmo)
-        
-        # Return total loss and unweighted individual components for logging
-        return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
+        if return_components:
+            return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
+        else:
+            return total_loss
 
     @nnx.jit
     def train_step(model, optimizer, x, cosmo, key):
 
-        loss_fn_ = partial(loss_fn, x=x, cosmo=cosmo, key=key, train=True)
-        (loss, (loss_x, loss_cosmo)), grads = nnx.value_and_grad(loss_fn_, has_aux=True)(model)
+        # loss_fn_ = partial(loss_fn, x=x, cosmo=cosmo, key=key, train=True)
+        loss_fn_ = partial(loss_fn, x=x, cosmo=cosmo, key=key, train=True, return_components=False)
+        loss, grads = nnx.value_and_grad(loss_fn_)(model)
         
         optimizer.update(model, grads)
 
-        return loss, loss_x, loss_cosmo
+        return loss
 
     key = jax.random.key(0)
 
@@ -231,12 +264,10 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
             cosmo = batch["theta"]
 
             key, subkey = jax.random.split(key, 2)
-            loss, loss_x, loss_cosmo = train_step(model, optimizer, x, cosmo, subkey)
+            loss = train_step(model, optimizer, x, cosmo, subkey)
             
             run.log({
                 "train/loss_total": loss,
-                "train/loss_field": loss_x,
-                "train/loss_cosmo": loss_cosmo
             })
 
         
@@ -249,7 +280,9 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
             batch = normalize_batch(batch)
             x_val = batch["map"]
             cosmo_val = batch["theta"]
-            val_loss, (val_loss_x, val_loss_cosmo) = loss_fn(model, x_val, cosmo_val, key, train=False)
+            val_loss, (val_loss_x, val_loss_cosmo) = loss_fn(
+                model, x_val, cosmo_val, key, train=False, return_components=True
+            )
             losses.append(val_loss)
             losses_x.append(val_loss_x)
             losses_cosmo.append(val_loss_cosmo)
