@@ -7,6 +7,8 @@ import jax
 import jax.numpy as jnp
 
 from flax import nnx
+from flax.training import orbax_utils
+import orbax.checkpoint as ocp
 import optax
 
 import numpy as np
@@ -15,8 +17,6 @@ from datasets import load_from_disk
 from functools import partial
 
 import matplotlib.pyplot as plt
-
-# from utils import PATH, plot_ae_residuals, random_flip
 
 import wandb
 
@@ -133,20 +133,23 @@ def normalize_batch(batch):
     
     return {'map': map_norm, 'theta': theta_norm}
 
-def train(num_epochs, batch_size):
+def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
 
     run = wandb.init(
         project="jade", 
         entity="b-remy"
         )
 
+    # Create checkpoint directory
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Setup Orbax checkpointer
+    checkpointer = ocp.PyTreeCheckpointer()
+    checkpoint_path = os.path.join(checkpoint_dir, 'model.ckpt')
+
     # Load dataset
     dataset = load_from_disk("sbi_lens_lognormal")
     dataset = dataset.with_format("numpy")
-
-    # Apply filter with batching
-    # dataset = dataset.filter(has_no_nans_batch, batched=True, batch_size=500)
-    # dataset = dataset.train_test_split(test_size=0.98, seed=42)["train"]
 
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     
@@ -173,8 +176,6 @@ def train(num_epochs, batch_size):
 
     weight_fn = lambda t: 1 / sigma_fn(t)**2 + 1
 
-    # Start with a classical variance exploding SDE
-    
     def loss_fn(model, x, cosmo, key, train=True):
 
         keys = jax.random.split(key, 3)
@@ -197,21 +198,24 @@ def train(num_epochs, batch_size):
         loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))  # MSE per sample [batch]
         loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)  # MSE per sample [batch]
         
-        # Combined loss with time weighting
-        combined_loss = (loss_x + loss_cosmo) * weight_fn(t)
-        total_loss = jnp.mean(combined_loss)
+        # Apply time weighting
+        weights = weight_fn(t)
+        weighted_loss_x = loss_x * weights
+        weighted_loss_cosmo = loss_cosmo * weights
         
-        # Return total loss and individual components for logging
+        # Combined loss
+        total_loss = jnp.mean(weighted_loss_x + weighted_loss_cosmo)
+        
+        # Return total loss and unweighted individual components for logging
         return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
 
-    @nnx.jit  # Automatic state management for JAX transforms.
+    @nnx.jit
     def train_step(model, optimizer, x, cosmo, key):
 
-        # VE SDE loss function
         loss_fn_ = partial(loss_fn, x=x, cosmo=cosmo, key=key, train=True)
         (loss, (loss_x, loss_cosmo)), grads = nnx.value_and_grad(loss_fn_, has_aux=True)(model)
         
-        optimizer.update(model, grads)  # in-place updates
+        optimizer.update(model, grads)
 
         return loss, loss_x, loss_cosmo
 
@@ -226,7 +230,6 @@ def train(num_epochs, batch_size):
             x = batch["map"]
             cosmo = batch["theta"]
 
-            # x = augmentation(x, key)
             key, subkey = jax.random.split(key, 2)
             loss, loss_x, loss_cosmo = train_step(model, optimizer, x, cosmo, subkey)
             
@@ -263,6 +266,11 @@ def train(num_epochs, batch_size):
 
         print(f"Epoch {epoch + 1}, Val Loss: {val_loss:.4f} (Field: {val_loss_x:.4f}, Cosmo: {val_loss_cosmo:.4f})")
 
+        # Save checkpoint (overwrites previous)
+        abstract_state = nnx.state(model)
+        checkpointer.save(checkpoint_path, abstract_state, force=True)
+        print(f"Checkpoint saved to {checkpoint_path}")
+
         fig = plot_denoiser(x_val, cosmo_val, model, key, THETA_MEAN, THETA_STD)
         wandb.log({"denoiser": wandb.Image(fig)})
         plt.close(fig)
@@ -271,6 +279,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the JADE model.")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size for training.")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save checkpoints.")
     args = parser.parse_args()
 
-    train(num_epochs=args.num_epochs, batch_size=args.batch_size)
+    train(num_epochs=args.num_epochs, batch_size=args.batch_size, checkpoint_dir=args.checkpoint_dir)
