@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import argparse
 
 import jax
 import jax.numpy as jnp
@@ -132,7 +133,7 @@ def normalize_batch(batch):
     
     return {'map': map_norm, 'theta': theta_norm}
 
-def train():
+def train(num_epochs, batch_size):
 
     run = wandb.init(
         project="jade", 
@@ -209,9 +210,6 @@ def train():
 
         return loss
 
-    num_epochs = 10
-    batch_size = 256
-
     key = jax.random.key(0)
 
     for epoch in range(num_epochs):
@@ -244,11 +242,14 @@ def train():
 
         print(f"Epoch {epoch + 1}, Validation Loss: {val_loss}")
 
-        fig = plot_denoiser(x_val, cosmo_val, model, key)
+        fig = plot_denoiser(x_val, cosmo_val, model, key, THETA_MEAN, THETA_STD)
         wandb.log({"denoiser": wandb.Image(fig)})
         plt.close(fig)
 
 if __name__ == "__main__":
-    # runid = wandb.util.generate_id()
-    # train(runid=runid)
-    train()
+    parser = argparse.ArgumentParser(description="Train the JADE model.")
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size for training.")
+    args = parser.parse_args()
+
+    train(num_epochs=args.num_epochs, batch_size=args.batch_size)
