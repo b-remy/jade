@@ -26,7 +26,7 @@ from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD
 from jade.nn import JADE_B_16
 
 SIGMA_MIN = 1e-2
-SIGMA_MAX = 50.
+SIGMA_MAX = 100.
 
 def sigma_fn(t, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MAX):
         return sigma_min * (sigma_max / sigma_min) ** (t)
@@ -133,7 +133,7 @@ def normalize_batch(batch):
     
     return {'map': map_norm, 'theta': theta_norm}
 
-def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
+def train(num_epochs, batch_size, checkpoint_dir='checkpoints', ema_decay=0.9999):
 
     run = wandb.init(
         project="jade", 
@@ -166,13 +166,26 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
     total = sum(x.size for x in jax.tree.leaves(params))
     print(f"Total parameters: {total:,}")
 
+    # Create EMA shadow parameters (copy of model parameters)
+    ema_params = jax.tree.map(lambda x: x.copy(), nnx.state(model, nnx.Param))
+    print(f"EMA initialized with decay: {ema_decay}")
+
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=1e-6,
+        peak_value=1e-4,
+        warmup_steps=1000,
+        decay_steps=num_epochs * len(ds_train) // batch_size,
+        end_value=1e-5
+    )
+
     # Optimizer setup
     opt = optax.chain(
         optax.clip_by_global_norm(1.0),
         optax.adamw(
-            learning_rate=1e-4, b1=0.9, b2=0.95, weight_decay=1e-4
+            learning_rate=schedule, b1=0.9, b2=0.95, weight_decay=1e-4
         ),
     )
+
     optimizer = nnx.Optimizer(model, opt, wrt=nnx.Param)
 
     weight_fn = lambda t: 1 / sigma_fn(t)**2 + 1
@@ -182,6 +195,8 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
 
         # sample time
         t = jax.random.beta(keys[0], a=3, b=3, shape=x.shape[:1])
+        # t = jax.random.uniform(keys[0], shape=x.shape[:1])
+        
         sigma_t = sigma_fn(t)
         
         # forward diffusion
@@ -210,13 +225,20 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
     @nnx.jit
     def train_step(model, optimizer, x, cosmo, key):
 
-        # loss_fn_ = partial(loss_fn, x=x, cosmo=cosmo, key=key, train=True)
         loss_fn_ = partial(loss_fn, x=x, cosmo=cosmo, key=key, train=True, return_components=False)
         loss, grads = nnx.value_and_grad(loss_fn_)(model)
         
         optimizer.update(model, grads)
 
         return loss
+
+    def update_ema(ema_params, model_params, decay):
+        """Update EMA parameters"""
+        return jax.tree.map(
+            lambda ema, new: decay * ema + (1 - decay) * new,
+            ema_params,
+            model_params
+        )
 
     key = jax.random.key(0)
 
@@ -232,12 +254,21 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
             key, subkey = jax.random.split(key, 2)
             loss = train_step(model, optimizer, x, cosmo, subkey)
             
+            current_params = nnx.state(model, nnx.Param)
+            ema_params = update_ema(ema_params, current_params, ema_decay)
+
             run.log({
                 "train/loss_total": loss,
             })
 
         
         # Validation
+
+        # with the EMA weights
+        original_params = nnx.state(model, nnx.Param)
+        # Temporarily load EMA params into model for validation
+        nnx.update(model, ema_params)
+
         losses = []
         losses_x = []
         losses_cosmo = []
@@ -273,6 +304,10 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
         fig = plot_denoiser(x_val, cosmo_val, model, key, THETA_MEAN, THETA_STD)
         wandb.log({"denoiser": wandb.Image(fig)})
         plt.close(fig)
+
+        # Restore original model params
+        nnx.update(model, original_params)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the JADE model.")
