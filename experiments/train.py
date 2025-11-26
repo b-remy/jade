@@ -22,6 +22,12 @@ import wandb
 
 from tqdm import tqdm
 
+SIGMA_MIN = 1e-3
+SIGMA_MAX = 1.
+
+def sigma_fn(t, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MAX):
+        return sigma_min * (sigma_max / sigma_min) ** (t)
+
 def plot_denoiser(x, model, key):
     keys = jax.random.split(key, 2)
     
@@ -51,6 +57,16 @@ def plot_denoiser(x, model, key):
 
     return fig
 
+def has_no_nans_batch(examples):
+    """Check batches for NaNs (faster)"""
+    valid_samples = []
+    for map_data, theta_data in zip(examples['map'], examples['theta']):
+        map_valid = not np.isnan(map_data).any()
+        theta_valid = not np.isnan(theta_data).any()
+        valid_samples.append(map_valid and theta_valid)
+    return valid_samples
+
+
 def train():
 
     run = wandb.init(
@@ -61,10 +77,16 @@ def train():
     # Load dataset
     dataset = load_from_disk("lensing_dataset")
     dataset = dataset.with_format("numpy")
+
+    # Apply filter with batching
+    dataset = dataset.filter(has_no_nans_batch, batched=True, batch_size=500)
+
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     
     ds_train = dataset["train"]
     ds_val = dataset["test"]
+    print(ds_train)
+    print(ds_test)
 
     # Model initialization
     model = JiT_B_16(rngs=nnx.Rngs(0), in_channels=5, input_size=128)
@@ -74,10 +96,13 @@ def train():
     print(f"Total parameters: {total:,}")
 
     # Optimizer setup
-    optimizer = nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)
-
-    def sigma_fn(t, sigma_min=1e-2, sigma_max=1.):
-        return sigma_min * (sigma_max / sigma_min) ** (t)
+    opt = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(
+            learning_rate=1e-4, b1=0.9, b2=0.95, weight_decay=1e-4
+        ),
+    )
+    optimizer = nnx.Optimizer(model, opt, wrt=nnx.Param)
 
     weight_fn = lambda t: 1 / sigma_fn(t)**2 + 1
 
@@ -107,9 +132,9 @@ def train():
     def train_step(model, optimizer, x, key):
 
         # VE SDE loss function
-        # loss = loss_fn(model, x, key, train=True)
         loss_fn_ = partial(loss_fn, x=x, key=key, train=True)
         loss, grads = nnx.value_and_grad(loss_fn_)(model)
+        
         optimizer.update(model, grads)  # in-place updates
 
         return loss
@@ -128,7 +153,7 @@ def train():
             x = batch["map"]
             # x = augmentation(x, key)
             # params, opt_state = update(params, opt_state, batch)
-            keys, subkey = jax.random.split(key, 2)
+            key, subkey = jax.random.split(key, 2)
             loss = train_step(model, optimizer, x, subkey)
             run.log({"loss_train": loss})
 
@@ -138,7 +163,6 @@ def train():
         val_loader = ds_val.iter(batch_size=batch_size, drop_last_batch=False)
         for batch in val_loader:
             x_val = batch["map"]
-            #model_ = jax.vmap(model, in_axes=(0,0,None,None))
             val_loss = loss_fn(model, x_val, key, train=False)
             losses.append(val_loss)
 
