@@ -10,7 +10,6 @@ import optax
 
 import numpy as np
 
-from jade.nn import JiT_B_16
 from datasets import load_from_disk
 from functools import partial
 
@@ -22,14 +21,18 @@ import wandb
 
 from tqdm import tqdm
 
-SIGMA_MIN = 1e-3
-SIGMA_MAX = 1.
+from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD
+from jade.nn import JADE_B_16
+
+SIGMA_MIN = 1e-2
+SIGMA_MAX = 50.
 
 def sigma_fn(t, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MAX):
         return sigma_min * (sigma_max / sigma_min) ** (t)
 
-def plot_denoiser(x, model, key):
-    keys = jax.random.split(key, 2)
+
+def plot_denoiser(x, cosmo, model, key, theta_mean, theta_std):
+    keys = jax.random.split(key, 3)
     
     t = jax.random.beta(keys[0], a=3, b=3, shape=x.shape[:1])
     sigma_t = sigma_fn(t)
@@ -38,24 +41,74 @@ def plot_denoiser(x, model, key):
     z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
     xt = x + z
 
-    model = jax.vmap(model, in_axes=(0,0,None,None))
-    x_pred = model(xt, sigma_t, 0, False)  # call methods directly
+    zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
+    cosmot = cosmo + zc
 
-    fig = plt.figure(figsize=(15, 9))  # Larger figure for 3x5 subplots
+    model = jax.vmap(model, in_axes=(0,0,0,None))
+    x_pred, cosmo_pred = model(xt, cosmot, sigma_t, False)  # call methods directly
+
+    # Denormalize cosmological parameters for display
+    def denormalize(cosmo_norm):
+        return cosmo_norm * theta_std + theta_mean
+    
+    cosmo_denorm = denormalize(cosmo)
+    cosmot_denorm = denormalize(cosmot)
+    cosmo_pred_denorm = denormalize(cosmo_pred)
+
+    fig = plt.figure(figsize=(18, 10))
+    
+    # Create gridspec for more control over layout
+    gs = fig.add_gridspec(3, 6, width_ratios=[1, 1, 1, 1, 1, 0.5], 
+                          hspace=0.3, wspace=0.2)
+    
+    # Plot images in first 5 columns
     for i in range(5):
         for j in range(3):
-            plt.subplot(3, 5, i + 1 + j*5)
+            ax = fig.add_subplot(gs[j, i])
             if j == 0:
-                plt.imshow(x[0, ..., i], cmap='viridis')
+                ax.imshow(x[0, ..., i], cmap='viridis')
+                if i == 0:
+                    ax.set_ylabel('Ground Truth', fontsize=12, fontweight='bold')
             elif j == 1:
-                plt.imshow(xt[0, ..., i], cmap='viridis')
+                ax.imshow(xt[0, ..., i], cmap='viridis')
+                if i == 0:
+                    ax.set_ylabel('Noisy', fontsize=12, fontweight='bold')
             elif j == 2:
-                plt.imshow(x_pred[0, ..., i], cmap='viridis')
-            plt.axis('off')  # Optional: hide axes for cleaner look
-            
-    # Log the figure to wandb
+                ax.imshow(x_pred[0, ..., i], cmap='viridis')
+                if i == 0:
+                    ax.set_ylabel('Predicted', fontsize=12, fontweight='bold')
+            ax.axis('off')
+    
+    # Add text information in the 6th column
+    param_names = ['Ωm', 'Ωb', 'h', 'ns', 'σ8', 'w0']
+    
+    for j in range(3):
+        ax_text = fig.add_subplot(gs[j, 5])
+        ax_text.axis('off')
+        
+        if j == 0:
+            cosmo_vals = cosmo_denorm[0]
+            title = 'Ground Truth\nCosmology'
+        elif j == 1:
+            cosmo_vals = cosmot_denorm[0]
+            title = 'Noisy\nCosmology'
+        else:
+            cosmo_vals = cosmo_pred_denorm[0]
+            title = 'Predicted\nCosmology'
+        
+        # Create text string
+        text_str = f'{title}\n' + '─' * 15 + '\n'
+        for name, val in zip(param_names, cosmo_vals):
+            text_str += f'{name:>4s}: {val:7.4f}\n'
+        
+        ax_text.text(0.1, 0.5, text_str, 
+                    fontsize=10, 
+                    family='monospace',
+                    verticalalignment='center',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
 
     return fig
+
 
 def has_no_nans_batch(examples):
     """Check batches for NaNs (faster)"""
@@ -66,6 +119,18 @@ def has_no_nans_batch(examples):
         valid_samples.append(map_valid and theta_valid)
     return valid_samples
 
+def normalize_batch(batch):
+    """Normalize a batch from the dataset."""
+    # Normalize theta: [batch_size, 6]
+    theta_norm = (batch['theta'] - THETA_MEAN) / THETA_STD
+    
+    # Normalize map: [batch_size, 128, 128, 5]
+    # Reshape field stats for broadcasting: [1, 1, 1, 5]
+    field_mean = FIELD_MEAN.reshape(1, 1, 1, -1)
+    field_std = FIELD_STD.reshape(1, 1, 1, -1)
+    map_norm = (batch['map'] - field_mean) / field_std
+    
+    return {'map': map_norm, 'theta': theta_norm}
 
 def train():
 
@@ -75,21 +140,22 @@ def train():
         )
 
     # Load dataset
-    dataset = load_from_disk("lensing_dataset")
+    dataset = load_from_disk("sbi_lens_lognormal")
     dataset = dataset.with_format("numpy")
 
     # Apply filter with batching
-    dataset = dataset.filter(has_no_nans_batch, batched=True, batch_size=500)
+    # dataset = dataset.filter(has_no_nans_batch, batched=True, batch_size=500)
+    # dataset = dataset.train_test_split(test_size=0.98, seed=42)["train"]
 
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     
     ds_train = dataset["train"]
     ds_val = dataset["test"]
     print(ds_train)
-    print(ds_test)
+    print(ds_val)
 
     # Model initialization
-    model = JiT_B_16(rngs=nnx.Rngs(0), in_channels=5, input_size=128)
+    model = JADE_B_16(rngs=nnx.Rngs(0), in_channels=5, input_size=128)
 
     params = nnx.state(model, nnx.Param)
     total = sum(x.size for x in jax.tree.leaves(params))
@@ -108,9 +174,9 @@ def train():
 
     # Start with a classical variance exploding SDE
     
-    def loss_fn(model, x, key, train=True):
+    def loss_fn(model, x, cosmo, key, train=True):
 
-        keys = jax.random.split(key, 2)
+        keys = jax.random.split(key, 3)
 
         # sample time
         t = jax.random.beta(keys[0], a=3, b=3, shape=x.shape[:1])
@@ -120,25 +186,28 @@ def train():
         z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
         xt = x + z
 
-        model = jax.vmap(model, in_axes=(0,0,None,None))
-        x_pred = model(xt, sigma_t, 0, train)  # call methods directly
+        zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
+        cosmot = cosmo + zc
+
+        model = jax.vmap(model, in_axes=(0,0,0,None))
+        x_pred, cosmo_pred = model(xt, cosmot, sigma_t, train)  
 
         # l2 loss
-        loss = (x - x_pred)**2
+        loss_x = (x - x_pred)**2 
+        loss_cosmo = (cosmo - cosmo_pred)**2
 
-        return jnp.mean(loss.sum((-1,-2,-3)) * weight_fn(t))
+        return jnp.mean((loss_x.sum((-1,-2,-3)) + loss_cosmo.sum(-1)) * weight_fn(t))
 
     @nnx.jit  # Automatic state management for JAX transforms.
-    def train_step(model, optimizer, x, key):
+    def train_step(model, optimizer, x, cosmo, key):
 
         # VE SDE loss function
-        loss_fn_ = partial(loss_fn, x=x, key=key, train=True)
+        loss_fn_ = partial(loss_fn, x=x, cosmo=cosmo, key=key, train=True)
         loss, grads = nnx.value_and_grad(loss_fn_)(model)
         
         optimizer.update(model, grads)  # in-place updates
 
         return loss
-
 
     num_epochs = 10
     batch_size = 256
@@ -149,12 +218,14 @@ def train():
         loader = ds_train.shuffle(seed=epoch).iter(batch_size=batch_size, drop_last_batch=True)
 
         for batch in tqdm(loader):
-            
+
+            batch = normalize_batch(batch)
             x = batch["map"]
+            cosmo = batch["theta"]
+
             # x = augmentation(x, key)
-            # params, opt_state = update(params, opt_state, batch)
             key, subkey = jax.random.split(key, 2)
-            loss = train_step(model, optimizer, x, subkey)
+            loss = train_step(model, optimizer, x, cosmo, subkey)
             run.log({"loss_train": loss})
 
         
@@ -162,8 +233,10 @@ def train():
         losses = []
         val_loader = ds_val.iter(batch_size=batch_size, drop_last_batch=False)
         for batch in val_loader:
+            batch = normalize_batch(batch)
             x_val = batch["map"]
-            val_loss = loss_fn(model, x_val, key, train=False)
+            cosmo_val = batch["theta"]
+            val_loss = loss_fn(model, x_val, cosmo_val, key, train=False)
             losses.append(val_loss)
 
         val_loss = np.mean(losses)
@@ -171,7 +244,7 @@ def train():
 
         print(f"Epoch {epoch + 1}, Validation Loss: {val_loss}")
 
-        fig = plot_denoiser(x_val, model, key)
+        fig = plot_denoiser(x_val, cosmo_val, model, key)
         wandb.log({"denoiser": wandb.Image(fig)})
         plt.close(fig)
 
