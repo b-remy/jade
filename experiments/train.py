@@ -152,8 +152,6 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
     dataset = load_from_disk("sbi_lens_lognormal")
     dataset = dataset.with_format("numpy")
 
-    dataset = dataset.train_test_split(test_size=0.9, seed=42)["train"]
-
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     
     ds_train = dataset["train"]
@@ -179,38 +177,6 @@ def train(num_epochs, batch_size, checkpoint_dir='checkpoints'):
 
     weight_fn = lambda t: 1 / sigma_fn(t)**2 + 1
 
-    # def loss_fn(model, x, cosmo, key, train=True):
-
-    #     keys = jax.random.split(key, 3)
-
-    #     # sample time
-    #     t = jax.random.beta(keys[0], a=3, b=3, shape=x.shape[:1])
-    #     sigma_t = sigma_fn(t)
-        
-    #     # forward diffusion
-    #     z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
-    #     xt = x + z
-
-    #     zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
-    #     cosmot = cosmo + zc
-
-    #     model = jax.vmap(model, in_axes=(0,0,0,None))
-    #     x_pred, cosmo_pred = model(xt, cosmot, sigma_t, train)  
-
-    #     # Compute separate losses with proper normalization
-    #     loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))  # MSE per sample [batch]
-    #     loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)  # MSE per sample [batch]
-        
-    #     # Apply time weighting
-    #     weights = weight_fn(t)
-    #     weighted_loss_x = loss_x * weights
-    #     weighted_loss_cosmo = loss_cosmo * weights
-        
-    #     # Combined loss
-    #     total_loss = jnp.mean(weighted_loss_x + weighted_loss_cosmo)
-        
-    #     # Return total loss and unweighted individual components for logging
-    #     return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
     def loss_fn(model, x, cosmo, key, train=True, return_components=False):
         keys = jax.random.split(key, 3)
 
