@@ -188,7 +188,7 @@ def train(cfg):
 
     # Create checkpoint directory
     # checkpoint_dir = os.path.abspath(cfg['checkpoint']['dir'])
-    checkpoint_dir = os.path.abspath(os.path.join(wandb.run.dir, 'checkpoints'))
+    checkpoint_dir = os.path.abspath(os.path.join(wandb.run.dir, 'checkpoints'))    
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     checkpointer = ocp.PyTreeCheckpointer()
@@ -219,13 +219,22 @@ def train(cfg):
     total = sum(x.size for x in jax.tree.leaves(params))
     print(f"Total parameters: {total:,}")
 
+    # # EMA setup
+    # if cfg['ema']['use_ema']:
+    #     ema_params = jax.tree.map(lambda x: x.copy(), nnx.state(model, nnx.Param))
+    #     print(f"EMA initialized with decay: {cfg['ema']['decay']}")
+    # else:
+    #     ema_params = None
+    #     print("EMA disabled")
+
     # EMA setup
     if cfg['ema']['use_ema']:
-        ema_params = jax.tree.map(lambda x: x.copy(), nnx.state(model, nnx.Param))
-        print(f"EMA initialized with decay: {cfg['ema']['decay']}")
+        ema_params = None  # <-- Start as None
+        print(f"EMA will be initialized after first epoch")
     else:
         ema_params = None
         print("EMA disabled")
+
 
     # Calculate total training steps
     steps_per_epoch = len(ds_train) // cfg['training']['batch_size']
@@ -321,11 +330,22 @@ def train(cfg):
             key, subkey = jax.random.split(key, 2)
             loss = train_step(model, optimizer, x, cosmo, subkey)
             
-            # Update EMA
-            if cfg['ema']['use_ema']:
+            # # Update EMA
+            # if cfg['ema']['use_ema']:
+            #     current_params = nnx.state(model, nnx.Param)
+            #     ema_params = update_ema(ema_params, current_params, cfg['ema']['decay'])
+            
+            # Initialize EMA after first epoch
+            if cfg['ema']['use_ema'] and ema_params is None and epoch >= 1:
+                ema_params = jax.tree.map(lambda x: x.copy(), nnx.state(model, nnx.Param))
+                print(f"EMA initialized from trained model at epoch {epoch}")
+            
+            # Update EMA (only if initialized)
+            if cfg['ema']['use_ema'] and ema_params is not None:
                 current_params = nnx.state(model, nnx.Param)
                 ema_params = update_ema(ema_params, current_params, cfg['ema']['decay'])
             
+
             # Logging
             if step % cfg['logging']['log_every_n_steps'] == 0:
                 run.log({"train/loss_total": loss, "train/epoch": epoch})
@@ -334,7 +354,7 @@ def train(cfg):
 
         
         # Validation
-        if cfg['ema']['use_ema']:
+        if cfg['ema']['use_ema'] and ema_params is not None:
             original_params = nnx.state(model, nnx.Param)
             nnx.update(model, ema_params)
         
@@ -382,14 +402,14 @@ def train(cfg):
             plt.close(fig)
         
         # Restore original params if using EMA
-        if cfg['ema']['use_ema']:
+        if cfg['ema']['use_ema'] and ema_params is not None:
             nnx.update(model, original_params)
 
         # Save checkpoints
         if (epoch + 1) % cfg['checkpoint']['save_every_n_epochs'] == 0:
             
             # Save EMA checkpoint (primary)
-            if cfg['ema']['use_ema']:
+            if cfg['ema']['use_ema'] and ema_params is not None:
                 checkpointer.save(
                     checkpoint_path_base + '_ema_latest', 
                     ema_params, 
@@ -406,7 +426,7 @@ def train(cfg):
             # Save best checkpoint
             if cfg['checkpoint']['keep_best'] and val_loss < best_val_loss:
                 best_val_loss = val_loss
-                if cfg['ema']['use_ema']:
+                if cfg['ema']['use_ema'] and ema_params is not None:
                     checkpointer.save(
                         checkpoint_path_base + '_ema_best', 
                         ema_params, 

@@ -30,8 +30,8 @@ optimizer:
 
 # EMA configuration
 ema:
-  use_ema: false
-  decay: 0.9999
+  use_ema: true
+  decay: 0.999
 
 # Diffusion configuration
 diffusion:
