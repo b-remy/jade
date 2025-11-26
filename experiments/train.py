@@ -193,22 +193,27 @@ def train(num_epochs, batch_size):
         model = jax.vmap(model, in_axes=(0,0,0,None))
         x_pred, cosmo_pred = model(xt, cosmot, sigma_t, train)  
 
-        # l2 loss
-        loss_x = (x - x_pred)**2 
-        loss_cosmo = (cosmo - cosmo_pred)**2
-
-        return jnp.mean((loss_x.sum((-1,-2,-3)) + loss_cosmo.sum(-1)) * weight_fn(t))
+        # Compute separate losses with proper normalization
+        loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))  # MSE per sample [batch]
+        loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)  # MSE per sample [batch]
+        
+        # Combined loss with time weighting
+        combined_loss = (loss_x + loss_cosmo) * weight_fn(t)
+        total_loss = jnp.mean(combined_loss)
+        
+        # Return total loss and individual components for logging
+        return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
 
     @nnx.jit  # Automatic state management for JAX transforms.
     def train_step(model, optimizer, x, cosmo, key):
 
         # VE SDE loss function
         loss_fn_ = partial(loss_fn, x=x, cosmo=cosmo, key=key, train=True)
-        loss, grads = nnx.value_and_grad(loss_fn_)(model)
+        (loss, (loss_x, loss_cosmo)), grads = nnx.value_and_grad(loss_fn_, has_aux=True)(model)
         
         optimizer.update(model, grads)  # in-place updates
 
-        return loss
+        return loss, loss_x, loss_cosmo
 
     key = jax.random.key(0)
 
@@ -223,24 +228,40 @@ def train(num_epochs, batch_size):
 
             # x = augmentation(x, key)
             key, subkey = jax.random.split(key, 2)
-            loss = train_step(model, optimizer, x, cosmo, subkey)
-            run.log({"loss_train": loss})
+            loss, loss_x, loss_cosmo = train_step(model, optimizer, x, cosmo, subkey)
+            
+            run.log({
+                "train/loss_total": loss,
+                "train/loss_field": loss_x,
+                "train/loss_cosmo": loss_cosmo
+            })
 
         
         # Validation
         losses = []
+        losses_x = []
+        losses_cosmo = []
         val_loader = ds_val.iter(batch_size=batch_size, drop_last_batch=False)
         for batch in val_loader:
             batch = normalize_batch(batch)
             x_val = batch["map"]
             cosmo_val = batch["theta"]
-            val_loss = loss_fn(model, x_val, cosmo_val, key, train=False)
+            val_loss, (val_loss_x, val_loss_cosmo) = loss_fn(model, x_val, cosmo_val, key, train=False)
             losses.append(val_loss)
+            losses_x.append(val_loss_x)
+            losses_cosmo.append(val_loss_cosmo)
 
         val_loss = np.mean(losses)
-        run.log({"val_loss": val_loss})
+        val_loss_x = np.mean(losses_x)
+        val_loss_cosmo = np.mean(losses_cosmo)
+        
+        run.log({
+            "val/loss_total": val_loss,
+            "val/loss_field": val_loss_x,
+            "val/loss_cosmo": val_loss_cosmo
+        })
 
-        print(f"Epoch {epoch + 1}, Validation Loss: {val_loss}")
+        print(f"Epoch {epoch + 1}, Val Loss: {val_loss:.4f} (Field: {val_loss_x:.4f}, Cosmo: {val_loss_cosmo:.4f})")
 
         fig = plot_denoiser(x_val, cosmo_val, model, key, THETA_MEAN, THETA_STD)
         wandb.log({"denoiser": wandb.Image(fig)})
