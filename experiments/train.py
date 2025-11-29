@@ -11,6 +11,8 @@ from flax import nnx
 import orbax.checkpoint as ocp
 import optax
 
+import dm_pix as pix
+
 import numpy as np
 
 from datasets import load_from_disk
@@ -40,12 +42,29 @@ def get_weight_fn(cfg):
     else:
         raise ValueError(f"Unknown weight type: {cfg['diffusion']['weight_type']}")
 
+@jax.jit
+@jax.vmap
+def augment(x, key):
+    """
+    x: image [w, h, c]
+    key: random key
+    """
+    keys = jax.random.split(key, 2)
+    x = pix.random_flip_left_right(keys[0], x)
+    x = pix.random_flip_up_down(keys[1], x)
+    return x
 
 def plot_denoiser(x, cosmo, model, key, cfg):
     """Visualization function"""
     keys = jax.random.split(key, 3)
     
-    if cfg['diffusion']['time_distribution'] == "beta":
+    if cfg['diffusion']['time_distribution'] == "logit":
+        mu = cfg['diffusion']['mu']
+        sigma = cfg['diffusion']['sigma']
+        s = (jax.random.normal(keys[0], shape=x.shape[:1]) + mu) * sigma
+        t = jax.nn.sigmoid(s)
+
+    elif cfg['diffusion']['time_distribution'] == "beta":
         t = jax.random.beta(
             keys[0], 
             a=cfg['diffusion']['beta_a'], 
@@ -55,17 +74,20 @@ def plot_denoiser(x, cosmo, model, key, cfg):
     else:
         t = jax.random.uniform(keys[0], shape=x.shape[:1])
     
-    sigma_t = sigma_fn(t, cfg)
+    # sigma_t = sigma_fn(t, cfg)
     
     # forward diffusion
-    z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
-    xt = x + z
+    # z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
+    # xt = x + z
 
-    zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
-    cosmot = cosmo + zc
+    # zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
+    # cosmot = cosmo + zc
+    
+    xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
+    cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
 
     model_vmap = jax.vmap(model, in_axes=(0,0,0,None))
-    x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, False)
+    x_pred, cosmo_pred = model_vmap(xt, cosmot, t, False)
 
     # Denormalize cosmological parameters for display
     def denormalize(cosmo_norm):
@@ -246,14 +268,20 @@ def train(cfg):
     optimizer = nnx.Optimizer(model, opt, wrt=nnx.Param)
 
     # Get weight function
-    weight_fn = get_weight_fn(cfg)
+    # weight_fn = get_weight_fn(cfg)
 
     def loss_fn(model, x, cosmo, key, train=True, return_components=False):
 
         keys = jax.random.split(key, 3)
 
         # Sample time
-        if cfg['diffusion']['time_distribution'] == "beta":
+        if cfg['diffusion']['time_distribution'] == "logit":
+            mu = cfg['diffusion']['mu']
+            sigma = cfg['diffusion']['sigma']
+            s = (jax.random.normal(keys[0], shape=x.shape[:1]) + mu) * sigma
+            t = jax.nn.sigmoid(s)
+
+        elif cfg['diffusion']['time_distribution'] == "beta":
             t = jax.random.beta(
                 keys[0], 
                 a=cfg['diffusion']['beta_a'], 
@@ -263,26 +291,30 @@ def train(cfg):
         else:  # uniform
             t = jax.random.uniform(keys[0], shape=x.shape[:1])
         
-        sigma_t = sigma_fn(t, cfg)
+        # sigma_t = sigma_fn(t, cfg)
         
         # Forward diffusion
-        z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
-        xt = x + z
+        # z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
+        # xt = x + z
 
-        zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
-        cosmot = cosmo + zc
+        # zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
+        # cosmot = cosmo + zc
+
+        xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
+        cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
+
 
         model_vmap = jax.vmap(model, in_axes=(0,0,0,None))
-        x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, train)
+        x_pred, cosmo_pred = model_vmap(xt, cosmot, t, train)
 
         # Compute losses
         loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
         loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
         
         # Apply time weighting and loss weighting
-        weights = weight_fn(t)
+        # weights = weight_fn(t)
         total_loss = jnp.mean(
-            (loss_x + cfg['loss']['lambda_cosmo'] * loss_cosmo) * weights
+            (loss_x + cfg['loss']['lambda_cosmo'] * loss_cosmo)  # * weights
         )
         
         if return_components:
@@ -324,7 +356,9 @@ def train(cfg):
         for batch in tqdm(loader, desc=f"Epoch {epoch+1}/{cfg['training']['num_epochs']}"):
 
             batch = normalize_batch(batch)
-            x = batch["map"]
+
+            key, subkey = jax.random.split(key, 2)
+            x = augment(batch["map"], jax.random.split(subkey, len(batch["map"])))
             cosmo = batch["theta"]
 
             key, subkey = jax.random.split(key, 2)

@@ -6,7 +6,7 @@ model:
 
 # Training configuration
 training:
-  num_epochs: 100
+  num_epochs: 128
   batch_size: 256
   seed: 42
   use_mixed_precision: true
@@ -37,7 +37,9 @@ ema:
 diffusion:
   sigma_min: 0.01
   sigma_max: 50.0
-  time_distribution: "beta"  # or "uniform"
+  time_distribution: "logit" #"beta"  # or "uniform"
+  mu: -0.8
+  sigma: 0.8
   beta_a: 3.0
   beta_b: 3.0
   weight_type: "inverse_sigma_squared_plus_one"
