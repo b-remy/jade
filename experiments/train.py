@@ -313,10 +313,21 @@ def train(cfg):
         
         # Apply time weighting and loss weighting
         # weights = weight_fn(t)
-        total_loss = jnp.mean(
-            (loss_x + cfg['loss']['lambda_cosmo'] * loss_cosmo)  # * weights
-        )
-        
+        if cfg["loss"]["type"]=="x-loss":
+            total_loss = jnp.mean(
+                (loss_x + cfg['loss']['lambda_cosmo'] * loss_cosmo)  # * weights
+            )
+
+        elif cfg["loss"]["type"]=="v-loss":
+            vx = (x - xt) / jnp.clip((1 - t[...,None,None,None]), a_min=0.05)
+            vx_pred = (x_pred - xt) / jnp.clip((1 - t[...,None,None,None]), a_min=0.05) 
+
+            vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
+            vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
+            total_loss = jnp.mean((vx - vx_pred)**2, (-1,-2,-3)) + cfg['loss']['lambda_cosmo'] * jnp.mean(
+              (vcosmo - vcosmo_pred)**2, (-1))
+            total_loss = total_loss.mean()
+
         if return_components:
             return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
         else:

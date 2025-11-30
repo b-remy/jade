@@ -65,4 +65,5 @@ logging:
 
 # Loss configuration
 loss:
+  type: "v-loss" # "x-loss"
   lambda_cosmo: 1.0
