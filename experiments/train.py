@@ -155,7 +155,8 @@ def normalize_batch(batch):
     
     field_mean = FIELD_MEAN.reshape(1, 1, 1, -1)
     field_std = FIELD_STD.reshape(1, 1, 1, -1)
-    map_norm = (batch['map'] - field_mean) / field_std
+    # map_norm = (batch['map'] - field_mean) / field_std
+    map_norm = batch['map'] * 100.
     
     return {'map': map_norm, 'theta': theta_norm}
 
@@ -276,6 +277,8 @@ def train(cfg):
 
         # Sample time
         if cfg['diffusion']['time_distribution'] == "logit":
+            print("Using logit time distribution")
+            
             mu = cfg['diffusion']['mu']
             sigma = cfg['diffusion']['sigma']
             s = (jax.random.normal(keys[0], shape=x.shape[:1]) + mu) * sigma
@@ -288,8 +291,10 @@ def train(cfg):
                 b=cfg['diffusion']['beta_b'], 
                 shape=x.shape[:1]
             )
-        else:  # uniform
+        elif cfg['diffusion']['time_distribution'] == "uniform":
             t = jax.random.uniform(keys[0], shape=x.shape[:1])
+        else:
+            raise ValueError(f"Unknown time distribution: {cfg['diffusion']['time_distribution']}")
         
         # sigma_t = sigma_fn(t, cfg)
         
