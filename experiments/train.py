@@ -22,9 +22,9 @@ import matplotlib.pyplot as plt
 import wandb
 from tqdm import tqdm
 
-from jade.nn import JADE_B_16
+from jade.nn import JADE_B_16, JADE_L_16
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD  # Import normalization stats
-
+from jade.diffusion import Denoiser
 
 def sigma_fn(t, cfg):
     """Noise schedule function"""
@@ -83,6 +83,8 @@ def plot_denoiser(x, cosmo, model, key, cfg):
     # zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
     # cosmot = cosmo + zc
     
+    t = t*0. + 0.1
+
     xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
     cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
 
@@ -146,6 +148,75 @@ def plot_denoiser(x, cosmo, model, key, cfg):
                     verticalalignment='center',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
 
+    return fig
+
+
+def denormalize_cosmo(cosmo_norm):
+    """Denormalize cosmological parameters."""
+    return cosmo_norm * THETA_STD + THETA_MEAN
+
+
+def denormalize_fields(fields_norm):
+    """Denormalize field data."""
+    field_mean = FIELD_MEAN.reshape(1, 1, 1, -1)
+    field_std = FIELD_STD.reshape(1, 1, 1, -1)
+    return fields_norm * field_std + field_mean
+
+
+def plot_samples(x_samples, cosmo_samples, n_samples=6, denormalize=True):
+    """Plot generated samples with cosmological parameters.
+    
+    Args:
+        x_samples: Generated field samples [batch, H, W, channels]
+        cosmo_samples: Generated cosmology samples [batch, n_params]
+        n_samples: Number of samples to plot (default 6)
+        denormalize: Whether to denormalize fields for display
+    """
+    n_samples = min(n_samples, x_samples.shape[0])
+    n_channels = x_samples.shape[-1]
+    
+    # Denormalize data for display
+    cosmo_denorm = denormalize_cosmo(cosmo_samples)
+    if denormalize:
+        x_display = denormalize_fields(x_samples)
+    else:
+        x_display = x_samples
+    
+    # Create figure with one row per sample
+    fig = plt.figure(figsize=(3 * n_channels, 3 * n_samples))
+    gs = fig.add_gridspec(n_samples, n_channels, hspace=0.3, wspace=0.1)
+    
+    param_names = ['Ωm', 'Ωb', 'h', 'ns', 'σ8', 'w0']
+    
+    for i in range(n_samples):
+        # Create title with cosmological parameters
+        cosmo_vals = cosmo_denorm[i]
+        title_parts = [f'{name}={val:.3f}' for name, val in zip(param_names, cosmo_vals)]
+        title = '  |  '.join(title_parts)
+        
+        for j in range(n_channels):
+            ax = fig.add_subplot(gs[i, j])
+            
+            # Plot field channel
+            im = ax.imshow(x_display[i, ..., j], cmap='viridis', aspect='auto')
+            ax.axis('off')
+            
+            # Add column header for first row
+            if i == 0:
+                ax.set_title(f'Channel {j}', fontsize=10, fontweight='bold')
+            
+            # Add cosmology parameters as row title (left side of first column)
+            if j == 0:
+                ax.text(-0.05, 0.5, title, 
+                       transform=ax.transAxes,
+                       fontsize=8,
+                       verticalalignment='center',
+                       horizontalalignment='right',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='wheat', alpha=0.7))
+    
+    plt.suptitle('Generated Samples: Density Fields + Cosmological Parameters', 
+                 fontsize=14, fontweight='bold', y=0.995)
+    
     return fig
 
 
@@ -235,8 +306,10 @@ def train(cfg):
     model = JADE_B_16(
         rngs=nnx.Rngs(cfg['training']['seed']), 
         in_channels=cfg['model']['in_channels'], 
-        input_size=cfg['model']['input_size']
+        input_size=cfg['model']['input_size'],
+        patch_size=16
     )
+
 
     params = nnx.state(model, nnx.Param)
     total = sum(x.size for x in jax.tree.leaves(params))
@@ -329,7 +402,7 @@ def train(cfg):
 
             vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
             vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
-            total_loss = jnp.mean((vx - vx_pred)**2, (-1,-2,-3)) + cfg['loss']['lambda_cosmo'] * jnp.mean(
+            total_loss = jnp.sum((vx - vx_pred)**2, (-1,-2,-3)) + cfg['loss']['lambda_cosmo'] * jnp.sum(
               (vcosmo - vcosmo_pred)**2, (-1))
             total_loss = total_loss.mean()
 
@@ -421,9 +494,9 @@ def train(cfg):
             cosmo_val = batch["theta"]
             
             key, val_key = jax.random.split(key, 2)
-            val_loss, (val_loss_x, val_loss_cosmo) = loss_fn(
-                model, x_val, cosmo_val, val_key, 
-                train=False, return_components=True
+            loss_val = partial(loss_fn, train=False, return_components=True)
+            val_loss, (val_loss_x, val_loss_cosmo) = nnx.jit(loss_val)(
+                model, x_val, cosmo_val, val_key,
             )
             losses.append(val_loss)
             losses_x.append(val_loss_x)
@@ -440,6 +513,10 @@ def train(cfg):
             "epoch": epoch + 1,
         })
 
+        
+
+
+
         model_type = "EMA" if cfg['ema']['use_ema'] else "Standard"
         print(f"Epoch {epoch + 1}, Val Loss ({model_type}): {val_loss:.4f} "
               f"(Field: {val_loss_x:.4f}, Cosmo: {val_loss_cosmo:.4f})")
@@ -451,6 +528,14 @@ def train(cfg):
             wandb.log({tag: wandb.Image(fig)})
             plt.close(fig)
         
+        if (epoch + 1) % 5 == 0:
+            # Sample
+            denoiser = Denoiser(model, cfg)
+            x_samples, cosmo_samples = denoiser.generate(key, batch_size=6, x_shape=x_val.shape, cosmo_shape=cosmo_val.shape)
+            fig = plot_samples(x_samples, cosmo_samples, n_samples=6)
+            wandb.log({"samples": wandb.Image(fig)})
+            plt.close(fig)
+
         # Restore original params if using EMA
         if cfg['ema']['use_ema'] and ema_params is not None:
             nnx.update(model, original_params)

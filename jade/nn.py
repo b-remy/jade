@@ -115,7 +115,7 @@ class RMSNorm(nnx.Module):
         hidden_states = hidden_states * jax.lax.rsqrt(variance + self.variance_epsilon)
         
         # Scale by learned weight and cast back to original dtype
-        return (self.weight.get_value() * hidden_states).astype(input_dtype)
+        return (self.weight.value * hidden_states).astype(input_dtype)
     
 def rotate_half(x):
     """Rotate half the hidden dims."""
@@ -1156,7 +1156,7 @@ def JADE_B_16(rngs, cosmo_dim=6, **kwargs):
     """Base model with 16x16 patches."""
     return JADE(
         depth=12, hidden_size=768, num_heads=12,
-        bottleneck_dim=128, patch_size=16,
+        bottleneck_dim=128,
         cosmo_dim=cosmo_dim, num_cosmo_tokens=1,
         rngs=rngs, **kwargs
     )
