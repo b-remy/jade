@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 
 from flax import nnx
-import orbax.checkpoint as ocp
+# import orbax.checkpoint as ocp
 import optax
 
 import dm_pix as pix
@@ -25,6 +25,7 @@ from tqdm import tqdm
 from jade.nn import JADE_B_16, JADE_L_16
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD  # Import normalization stats
 from jade.diffusion import Denoiser
+from jade.utils import dump_model
 
 def sigma_fn(t, cfg):
     """Noise schedule function"""
@@ -285,8 +286,8 @@ def train(cfg):
     checkpoint_dir = os.path.abspath(os.path.join(wandb.run.dir, 'checkpoints'))    
     os.makedirs(checkpoint_dir, exist_ok=True)
     
-    checkpointer = ocp.PyTreeCheckpointer()
-    checkpoint_path_base = os.path.join(checkpoint_dir, cfg['model']['name'])
+    # checkpointer = ocp.PyTreeCheckpointer()
+    # checkpoint_path_base = os.path.join(checkpoint_dir, cfg['model']['name'])
 
     # Load dataset
     dataset = load_from_disk(cfg['data']['dataset_path'])
@@ -545,34 +546,48 @@ def train(cfg):
             
             # Save EMA checkpoint (primary)
             if cfg['ema']['use_ema'] and ema_params is not None:
-                checkpointer.save(
-                    checkpoint_path_base + '_ema_latest', 
-                    ema_params, 
-                    force=True
-                )
+                # checkpointer.save(
+                #     checkpoint_path_base + '_ema_latest', 
+                #     ema_params, 
+                #     force=True
+                # )
+                dump_model(
+                    cfg,
+                    ema_params,
+                    f"{cfg['model']['name']}_ema_latest",
+                    checkpoint_dir,
+                    )
+                
+
             
             # Save training checkpoint
-            checkpointer.save(
-                checkpoint_path_base + '_latest', 
-                nnx.state(model, nnx.Param), 
-                force=True
+            # checkpointer.save(
+            #     checkpoint_path_base + '_latest', 
+            #     nnx.state(model, nnx.Param), 
+            #     force=True
+            # )
+            dump_model(
+                cfg,
+                nnx.state(model, nnx.Param),
+                f"{cfg['model']['name']}_latest",
+                checkpoint_dir,
             )
             
-            # Save best checkpoint
-            if cfg['checkpoint']['keep_best'] and val_loss < best_val_loss:
-                best_val_loss = val_loss
-                if cfg['ema']['use_ema'] and ema_params is not None:
-                    checkpointer.save(
-                        checkpoint_path_base + '_ema_best', 
-                        ema_params, 
-                        force=True
-                    )
-                checkpointer.save(
-                    checkpoint_path_base + '_best', 
-                    nnx.state(model, nnx.Param), 
-                    force=True
-                )
-                print(f"✓ Best model saved (val_loss: {val_loss:.4f})")
+            # # Save best checkpoint
+            # if cfg['checkpoint']['keep_best'] and val_loss < best_val_loss:
+            #     best_val_loss = val_loss
+            #     if cfg['ema']['use_ema'] and ema_params is not None:
+            #         checkpointer.save(
+            #             checkpoint_path_base + '_ema_best', 
+            #             ema_params, 
+            #             force=True
+            #         )
+            #     checkpointer.save(
+            #         checkpoint_path_base + '_best', 
+            #         nnx.state(model, nnx.Param), 
+            #         force=True
+            #     )
+                # print(f"✓ Best model saved (val_loss: {val_loss:.4f})")
             
             print(f"✓ Checkpoints saved")
 
