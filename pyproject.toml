@@ -10,7 +10,6 @@ dependencies = [
     "dm-pix>=0.4.4",
     "einops>=0.8.1",
     "matplotlib>=3.10.7",
-    "orbax>=0.1.9",
     "wandb>=0.23.0",
 ]
 

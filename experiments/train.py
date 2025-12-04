@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 
 from flax import nnx
-# import orbax.checkpoint as ocp
 import optax
 
 import dm_pix as pix
@@ -454,11 +453,6 @@ def train(cfg):
             key, subkey = jax.random.split(key, 2)
             loss = train_step(model, optimizer, x, cosmo, subkey)
             
-            # # Update EMA
-            # if cfg['ema']['use_ema']:
-            #     current_params = nnx.state(model, nnx.Param)
-            #     ema_params = update_ema(ema_params, current_params, cfg['ema']['decay'])
-            
             # Initialize EMA after first epoch
             if cfg['ema']['use_ema'] and ema_params is None and epoch >= 1:
                 ema_params = jax.tree.map(lambda x: x.copy(), nnx.state(model, nnx.Param))
@@ -514,9 +508,6 @@ def train(cfg):
             "epoch": epoch + 1,
         })
 
-        
-
-
 
         model_type = "EMA" if cfg['ema']['use_ema'] else "Standard"
         print(f"Epoch {epoch + 1}, Val Loss ({model_type}): {val_loss:.4f} "
@@ -546,11 +537,6 @@ def train(cfg):
             
             # Save EMA checkpoint (primary)
             if cfg['ema']['use_ema'] and ema_params is not None:
-                # checkpointer.save(
-                #     checkpoint_path_base + '_ema_latest', 
-                #     ema_params, 
-                #     force=True
-                # )
                 dump_model(
                     cfg,
                     ema_params,
@@ -558,14 +544,6 @@ def train(cfg):
                     checkpoint_dir,
                     )
                 
-
-            
-            # Save training checkpoint
-            # checkpointer.save(
-            #     checkpoint_path_base + '_latest', 
-            #     nnx.state(model, nnx.Param), 
-            #     force=True
-            # )
             dump_model(
                 cfg,
                 nnx.state(model, nnx.Param),
@@ -573,21 +551,25 @@ def train(cfg):
                 checkpoint_dir,
             )
             
-            # # Save best checkpoint
-            # if cfg['checkpoint']['keep_best'] and val_loss < best_val_loss:
-            #     best_val_loss = val_loss
-            #     if cfg['ema']['use_ema'] and ema_params is not None:
-            #         checkpointer.save(
-            #             checkpoint_path_base + '_ema_best', 
-            #             ema_params, 
-            #             force=True
-            #         )
-            #     checkpointer.save(
-            #         checkpoint_path_base + '_best', 
-            #         nnx.state(model, nnx.Param), 
-            #         force=True
-            #     )
-                # print(f"✓ Best model saved (val_loss: {val_loss:.4f})")
+            # Save best checkpoint
+            if cfg['checkpoint']['keep_best'] and val_loss < best_val_loss:
+                best_val_loss = val_loss
+                if cfg['ema']['use_ema'] and ema_params is not None:
+                    dump_model(
+                    cfg,
+                    ema_params,
+                    f"{cfg['model']['name']}_ema_best",
+                    checkpoint_dir,
+                    )
+
+                dump_model(
+                    cfg,
+                    nnx.state(model, nnx.Param),
+                    f"{cfg['model']['name']}_best",
+                    checkpoint_dir,
+                )
+
+                print(f"✓ Best model saved (val_loss: {val_loss:.4f})")
             
             print(f"✓ Checkpoints saved")
 
