@@ -27,7 +27,7 @@ from jade.diffusion import Denoiser
 from jade.utils import dump_model
 
 def sigma_fn(t, cfg):
-    """Noise schedule function"""
+    """Noise schedule function for variance exploding diffusion"""
     return cfg['diffusion']['sigma_min'] * (
         cfg['diffusion']['sigma_max'] / cfg['diffusion']['sigma_min']
     ) ** t
@@ -74,19 +74,21 @@ def plot_denoiser(x, cosmo, model, key, cfg):
     else:
         t = jax.random.uniform(keys[0], shape=x.shape[:1])
     
-    # sigma_t = sigma_fn(t, cfg)
+    # Get diffusion mode
+    diffusion_mode = cfg['diffusion'].get('mode', 'linear')
     
-    # forward diffusion
-    # z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
-    # xt = x + z
-
-    # zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
-    # cosmot = cosmo + zc
+    # Use fixed t for visualization
+    # t = t*0. + 0.1
     
-    t = t*0. + 0.1
-
-    xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
-    cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
+    if diffusion_mode == 'linear':
+        # Linear interpolant
+        xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
+        cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
+    elif diffusion_mode == 'variance_exploding' or diffusion_mode == 've':
+        # Variance exploding
+        sigma_t = sigma_fn(t, cfg)
+        xt = x + sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
+        cosmot = cosmo + sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
 
     model_vmap = jax.vmap(model, in_axes=(0,0,0,None))
     x_pred, cosmo_pred = model_vmap(xt, cosmot, t, False)
@@ -275,6 +277,14 @@ def train(cfg):
         config=cfg,
     )
     
+    # Print diffusion mode
+    diffusion_mode = cfg['diffusion'].get('mode', 'linear')
+    print(f"Diffusion mode: {diffusion_mode}")
+    if diffusion_mode == 'variance_exploding' or diffusion_mode == 've':
+        print(f"  σ_min: {cfg['diffusion']['sigma_min']}")
+        print(f"  σ_max: {cfg['diffusion']['sigma_max']}")
+        print(f"  Weight type: {cfg['diffusion']['weight_type']}")
+    
     # Save config to wandb run directory
     config_save_path = os.path.join(wandb.run.dir, 'config.yaml')
     with open(config_save_path, 'w') as f:
@@ -315,14 +325,6 @@ def train(cfg):
     total = sum(x.size for x in jax.tree.leaves(params))
     print(f"Total parameters: {total:,}")
 
-    # # EMA setup
-    # if cfg['ema']['use_ema']:
-    #     ema_params = jax.tree.map(lambda x: x.copy(), nnx.state(model, nnx.Param))
-    #     print(f"EMA initialized with decay: {cfg['ema']['decay']}")
-    # else:
-    #     ema_params = None
-    #     print("EMA disabled")
-
     # EMA setup
     if cfg['ema']['use_ema']:
         ema_params = None  # <-- Start as None
@@ -341,16 +343,12 @@ def train(cfg):
     opt = create_optimizer(cfg, total_steps)
     optimizer = nnx.Optimizer(model, opt, wrt=nnx.Param)
 
-    # Get weight function
-    # weight_fn = get_weight_fn(cfg)
-
     def loss_fn(model, x, cosmo, key, train=True, return_components=False):
 
         keys = jax.random.split(key, 3)
 
         # Sample time
         if cfg['diffusion']['time_distribution'] == "logit":
-            print("Using logit time distribution")
             
             mu = cfg['diffusion']['mu']
             sigma = cfg['diffusion']['sigma']
@@ -369,42 +367,87 @@ def train(cfg):
         else:
             raise ValueError(f"Unknown time distribution: {cfg['diffusion']['time_distribution']}")
         
-        # sigma_t = sigma_fn(t, cfg)
+        # Get diffusion mode
+        diffusion_mode = cfg['diffusion'].get('mode', 'linear')
         
-        # Forward diffusion
-        # z = sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
-        # xt = x + z
-
-        # zc = sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
-        # cosmot = cosmo + zc
-
-        xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
-        cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
-
+        if diffusion_mode == 'linear':
+            # Linear interpolant (current implementation)
+            xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
+            cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
+            
+        elif diffusion_mode == 'variance_exploding' or diffusion_mode == 've':
+            # Variance exploding: xt = x + sigma_t * z
+            sigma_t = sigma_fn(t, cfg)
+            
+            z = jax.random.normal(keys[1], shape=x.shape)
+            xt = x + sigma_t[...,None,None,None] * z
+            
+            zc = jax.random.normal(keys[2], shape=cosmo.shape)
+            cosmot = cosmo + sigma_t[...,None] * zc
+            
+        else:
+            raise ValueError(f"Unknown diffusion mode: {diffusion_mode}. Must be 'linear' or 'variance_exploding'")
 
         model_vmap = jax.vmap(model, in_axes=(0,0,0,None))
         x_pred, cosmo_pred = model_vmap(xt, cosmot, t, train)
 
-        # Compute losses
-        loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
-        loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
-        
-        # Apply time weighting and loss weighting
-        # weights = weight_fn(t)
-        if cfg["loss"]["type"]=="x-loss":
-            total_loss = jnp.mean(
-                (loss_x + cfg['loss']['lambda_cosmo'] * loss_cosmo)  # * weights
-            )
+        # Compute losses based on diffusion mode and loss type
+        if diffusion_mode == 'linear':
+            # Linear interpolant losses
+            loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
+            loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
+            
+            if cfg["loss"]["type"]=="x-loss":
+                total_loss = jnp.mean(
+                    (loss_x + cfg['loss']['lambda_cosmo'] * loss_cosmo)
+                )
 
-        elif cfg["loss"]["type"]=="v-loss":
-            vx = (x - xt) / jnp.clip((1 - t[...,None,None,None]), a_min=0.05)
-            vx_pred = (x_pred - xt) / jnp.clip((1 - t[...,None,None,None]), a_min=0.05) 
+            elif cfg["loss"]["type"]=="v-loss":
+                vx = (x - xt) / jnp.clip((1 - t[...,None,None,None]), a_min=0.05)
+                vx_pred = (x_pred - xt) / jnp.clip((1 - t[...,None,None,None]), a_min=0.05) 
 
-            vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
-            vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
-            total_loss = jnp.sum((vx - vx_pred)**2, (-1,-2,-3)) + cfg['loss']['lambda_cosmo'] * jnp.sum(
-              (vcosmo - vcosmo_pred)**2, (-1))
-            total_loss = total_loss.mean()
+                vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
+                vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
+                total_loss = jnp.sum((vx - vx_pred)**2, (-1,-2,-3)) + cfg['loss']['lambda_cosmo'] * jnp.sum(
+                  (vcosmo - vcosmo_pred)**2, (-1))
+                total_loss = total_loss.mean()
+            else:
+                raise ValueError(f"Unknown loss type for linear mode: {cfg['loss']['type']}")
+                
+        elif diffusion_mode == 'variance_exploding' or diffusion_mode == 've':
+            # Variance exploding losses
+            sigma_t = sigma_fn(t, cfg)
+            weights = get_weight_fn(cfg)(t)
+            
+            if cfg["loss"]["type"]=="x-loss":
+                # Direct denoising objective
+                loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
+                loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
+                total_loss = jnp.mean(
+                    weights * (loss_x + cfg['loss']['lambda_cosmo'] * loss_cosmo)
+                )
+                
+            # elif cfg["loss"]["type"]=="eps-loss":
+            #     # Noise prediction objective: predict the noise z
+            #     # Ground truth noise
+            #     z_true = (xt - x) / sigma_t[...,None,None,None]
+            #     zc_true = (cosmot - cosmo) / sigma_t[...,None]
+                
+            #     # Predicted noise from model output
+            #     z_pred = (xt - x_pred) / sigma_t[...,None,None,None]
+            #     zc_pred = (cosmot - cosmo_pred) / sigma_t[...,None]
+                
+            #     loss_x = jnp.mean((z_true - z_pred)**2, axis=(-1,-2,-3))
+            #     loss_cosmo = jnp.mean((zc_true - zc_pred)**2, axis=-1)
+            #     total_loss = jnp.mean(
+            #         weights * (loss_x + cfg['loss']['lambda_cosmo'] * loss_cosmo)
+            #     )
+            else:
+                raise ValueError(f"Unknown loss type for VE mode: {cfg['loss']['type']}")
+            
+            # Store unweighted losses for logging
+            loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
+            loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
 
         if return_components:
             return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
@@ -520,7 +563,7 @@ def train(cfg):
             wandb.log({tag: wandb.Image(fig)})
             plt.close(fig)
         
-        if (epoch + 1) % 5 == 0:
+        # if (epoch + 1) % 5 == 0:
             # Sample
             denoiser = Denoiser(model, cfg)
             x_samples, cosmo_samples = denoiser.generate(key, batch_size=6, x_shape=x_val.shape, cosmo_shape=cosmo_val.shape)
