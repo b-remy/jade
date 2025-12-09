@@ -4,6 +4,27 @@ from flax import nnx
 from functools import partial
 
 
+class VESDE:
+    """Variance Exploding SDE.
+    
+    The forward SDE: dx = sigma(t) * dw
+    where sigma(t) = sigma_min * (sigma_max / sigma_min)^t
+    """
+    def __init__(self, sigma_min: float = 0.01, sigma_max: float = 50.0):
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+    
+    def sigma(self, t):
+        """Compute noise schedule at time t.
+        
+        Args:
+            t: Time value(s) in [0, 1]
+            
+        Returns:
+            Noise level sigma(t)
+        """
+        return self.sigma_min * (self.sigma_max / self.sigma_min) ** t
+
 class Denoiser(nnx.Module):
     def __init__(self, model: nnx.Module, cfg: dict):
         """Initialize the Denoiser with a model and config.
@@ -17,9 +38,14 @@ class Denoiser(nnx.Module):
         
         # Sampling parameters
         self.steps = cfg.get('sampling', {}).get('steps', 50)
-        self.method = cfg.get('sampling', {}).get('method', 'euler')  # 'euler' or 'heun'
+        self.method = cfg.get('sampling', {}).get('method', 'euler')  # 'euler', 'heun', or 'ddpm'
         self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.05)
         self.noise_scale = cfg.get('sampling', {}).get('noise_scale', 1.0)
+        
+        # Initialize VESDE for variance exploding methods
+        sigma_min = cfg.get('diffusion', {}).get('sigma_min', 0.01)
+        sigma_max = cfg.get('diffusion', {}).get('sigma_max', 50.0)
+        self.sde = VESDE(sigma_min=sigma_min, sigma_max=sigma_max)
     
     def forward_process(self, x, cosmo, key):
         """Forward corruption process using flow matching.
@@ -139,7 +165,7 @@ class Denoiser(nnx.Module):
         else:
             return total_loss
     
-    # ==================== Sampling Methods ====================
+    # ==================== Flow Matching Sampling Methods ====================
     
     def _forward_sample(self, z_x, z_cosmo, t):
         """Compute velocity predictions for both x and cosmo.
@@ -221,23 +247,149 @@ class Denoiser(nnx.Module):
         
         return z_x_next, z_cosmo_next
     
-    def generate(self, key, batch_size=1, x_shape=None, cosmo_shape=None):
-        """Generate joint samples of x and cosmo using ODE sampling.
+    # ==================== Variance Exploding Sampling Methods ====================
+    
+    @nnx.jit
+    def _ve_denoise_fn(self, xt, cosmot, sigma_t):
+        """Model wrapper for VE sampling that takes sigma instead of t.
+        
+        Args:
+            xt: Noisy field data [batch, H, W, channels]
+            cosmot: Noisy cosmological parameters [batch, n_params]
+            sigma_t: Noise level (can be scalar or array)
+            
+        Returns:
+            tuple: (x_pred, cosmo_pred) - predicted clean data
+        """
+        # Convert sigma to time t if needed
+        # For VE, we can pass sigma directly or convert to t space
+        # Assuming model expects t in [0, 1], we can use sigma as a proxy
+        # or define a mapping. Here we'll assume the model can handle it.
+        
+        # If sigma_t is scalar, broadcast to batch
+        #if jnp.ndim(sigma_t) == 0:
+        #    sigma_t = jnp.full((xt.shape[0],), sigma_t)
+        
+        model_vmap = jax.vmap(self.model, in_axes=(0, 0, 0, None))
+        x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, False)
+        
+        return x_pred, cosmo_pred
+    
+    def _ddpm_step(self, xt, cosmot, t, s, key):
+        """Single DDPM step for variance exploding SDE.
+        
+        Uses the reverse SDE:
+        x_s = x_t - tau * (x_t - f(x_t)) + sigma_s * sqrt(tau) * epsilon
+        where tau = 1 - (sigma_s / sigma_t)^2
+        
+        Args:
+            xt: Current field state [batch, H, W, channels]
+            cosmot: Current cosmological parameters state [batch, n_params]
+            t: Current time [batch,] or scalar
+            s: Next time [batch,] or scalar
+            key: Random key for noise
+            
+        Returns:
+            tuple: (x_next, cosmo_next) - next state
+        """
+        keys = jax.random.split(key, 2)
+        
+        # Get noise levels
+        sigma_s = self.sde.sigma(s)
+        sigma_t = self.sde.sigma(t)
+
+        # Compute tau
+        tau = 1 - (sigma_s / sigma_t) ** 2
+        
+        # Get denoised predictions
+        x_pred, cosmo_pred = self._ve_denoise_fn(xt, cosmot, sigma_t)
+        
+        # Generate noise
+        eps_x = jax.random.normal(keys[0], xt.shape)
+        eps_cosmo = jax.random.normal(keys[1], cosmot.shape)
+        
+        # Broadcast tau if scalar
+        if jnp.ndim(tau) == 0:
+            tau_x = tau
+            tau_cosmo = tau
+            sigma_s_x = sigma_s
+            sigma_s_cosmo = sigma_s
+        else:
+            tau_x = tau[:, None, None, None]
+            tau_cosmo = tau[:, None]
+            sigma_s_x = sigma_s[:, None, None, None]
+            sigma_s_cosmo = sigma_s[:, None]
+        
+        # DDPM update
+        x_next = xt - tau_x * (xt - x_pred) + sigma_s_x * jnp.sqrt(tau_x) * eps_x
+        cosmo_next = cosmot - tau_cosmo * (cosmot - cosmo_pred) + sigma_s_cosmo * jnp.sqrt(tau_cosmo) * eps_cosmo
+        
+        return x_next, cosmo_next
+    
+    def generate_ve(self, key, batch_size=1, t_start=1.0):
+        """Generate samples using variance exploding DDPM sampling.
+        
+        Args:
+            key: Random key
+            batch_size: Number of samples to generate
+            t_start: Starting time (default 1.0, maximum noise)
+            
+        Returns:
+            tuple: (x_generated, cosmo_generated) - generated samples
+        """
+        # Determine shapes
+        x_shape = (
+            self.cfg.get('data', {}).get('image_size', 128),
+            self.cfg.get('data', {}).get('image_size', 128),
+            self.cfg.get('data', {}).get('n_channels', 5)
+        )
+        cosmo_dim = 6
+        
+        # Initialize from noise scaled by sigma(t_start)
+        keys = jax.random.split(key, 2 + self.steps)
+        sigma_start = self.sde.sigma(t_start)
+        
+        xt = sigma_start * jax.random.normal(keys[0], shape=(batch_size, 128, 128, 5))
+        cosmot = sigma_start * jax.random.normal(keys[1], shape=(batch_size, cosmo_dim))
+        
+        # Create timesteps from t_start to dt (near 0)
+        dt = t_start / self.steps
+        timesteps = jnp.linspace(t_start, dt, self.steps)
+        
+        # Reverse process: iterate from high noise to low noise
+        for i in range(self.steps - 1):
+            t = jnp.full((batch_size,), timesteps[i])
+            s = jnp.full((batch_size,), timesteps[i + 1])
+            xt, cosmot = self._ddpm_step(xt, cosmot, t, s, keys[2 + i])
+        
+        # Final denoising step at t=dt
+        x_final, cosmo_final = self._ve_denoise_fn(xt, cosmot, 0.*jnp.ones((batch_size,)))
+        #return xt, cosmot
+        return x_final, cosmo_final
+    
+    def generate(self, key, batch_size=1, x_shape=None, cosmo_shape=None, use_ve=False):
+        """Generate joint samples of x and cosmo.
         
         Args:
             key: Random key for initialization
             batch_size: Number of samples to generate
             x_shape: Shape of field data (H, W, channels). If None, inferred from config
+            cosmo_shape: Shape of cosmo parameters. If None, uses default (6,)
+            use_ve: If True, use variance exploding DDPM sampler. Otherwise use flow matching.
             
         Returns:
             tuple: (x_generated, cosmo_generated) - generated samples
         """
+        if use_ve:
+            return self.generate_ve(key, batch_size)
+        
+        # Original flow matching generation
         # Determine field shape
         if x_shape is None:
             x_shape = (
-                self.cfg.get('data', {}).get('image_size', 64),
-                self.cfg.get('data', {}).get('image_size', 64),
-                self.cfg.get('data', {}).get('n_channels', 3)
+                self.cfg.get('data', {}).get('image_size', 128),
+                self.cfg.get('data', {}).get('image_size', 128),
+                self.cfg.get('data', {}).get('n_channels', 5)
             )
         
         # Get cosmological parameter dimension
@@ -245,7 +397,7 @@ class Denoiser(nnx.Module):
         
         # Initialize from pure noise (t=0)
         keys = jax.random.split(key, 2)
-        z_x = self.noise_scale * jax.random.normal(keys[0], shape=(batch_size, 128,128,5))
+        z_x = self.noise_scale * jax.random.normal(keys[0], shape=(batch_size, 128, 128, 5))
         z_cosmo = self.noise_scale * jax.random.normal(keys[1], shape=(batch_size, cosmo_dim))
         
         # Create timesteps from 0 to 1

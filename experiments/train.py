@@ -84,6 +84,8 @@ def plot_denoiser(x, cosmo, model, key, cfg):
         # Linear interpolant
         xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
         cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
+        sigma_t = t
+
     elif diffusion_mode == 'variance_exploding' or diffusion_mode == 've':
         # Variance exploding
         sigma_t = sigma_fn(t, cfg)
@@ -91,7 +93,7 @@ def plot_denoiser(x, cosmo, model, key, cfg):
         cosmot = cosmo + sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
 
     model_vmap = jax.vmap(model, in_axes=(0,0,0,None))
-    x_pred, cosmo_pred = model_vmap(xt, cosmot, t, False)
+    x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, False)
 
     # Denormalize cosmological parameters for display
     def denormalize(cosmo_norm):
@@ -222,6 +224,7 @@ def plot_samples(x_samples, cosmo_samples, n_samples=6, denormalize=True):
     return fig
 
 
+@jax.jit
 def normalize_batch(batch):
     """Normalize a batch from the dataset."""
     theta_norm = (batch['theta'] - THETA_MEAN) / THETA_STD
@@ -317,6 +320,7 @@ def train(cfg):
         rngs=nnx.Rngs(cfg['training']['seed']), 
         in_channels=cfg['model']['in_channels'], 
         input_size=cfg['model']['input_size'],
+        num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
         patch_size=16
     )
 
@@ -374,6 +378,7 @@ def train(cfg):
             # Linear interpolant (current implementation)
             xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
             cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
+            sigma_t = t
             
         elif diffusion_mode == 'variance_exploding' or diffusion_mode == 've':
             # Variance exploding: xt = x + sigma_t * z
@@ -389,7 +394,7 @@ def train(cfg):
             raise ValueError(f"Unknown diffusion mode: {diffusion_mode}. Must be 'linear' or 'variance_exploding'")
 
         model_vmap = jax.vmap(model, in_axes=(0,0,0,None))
-        x_pred, cosmo_pred = model_vmap(xt, cosmot, t, train)
+        x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, train)
 
         # Compute losses based on diffusion mode and loss type
         if diffusion_mode == 'linear':
@@ -408,7 +413,7 @@ def train(cfg):
 
                 vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
                 vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[...,None]), a_min=0.05)
-                total_loss = jnp.sum((vx - vx_pred)**2, (-1,-2,-3)) + cfg['loss']['lambda_cosmo'] * jnp.sum(
+                total_loss = jnp.mean((vx - vx_pred)**2, (-1,-2,-3)) + cfg['loss']['lambda_cosmo'] * jnp.mean(
                   (vcosmo - vcosmo_pred)**2, (-1))
                 total_loss = total_loss.mean()
             else:
@@ -566,7 +571,7 @@ def train(cfg):
         # if (epoch + 1) % 5 == 0:
             # Sample
             denoiser = Denoiser(model, cfg)
-            x_samples, cosmo_samples = denoiser.generate(key, batch_size=6, x_shape=x_val.shape, cosmo_shape=cosmo_val.shape)
+            x_samples, cosmo_samples = denoiser.generate(key, batch_size=6, x_shape=x_val.shape, cosmo_shape=cosmo_val.shape, use_ve=True)
             fig = plot_samples(x_samples, cosmo_samples, n_samples=6)
             wandb.log({"samples": wandb.Image(fig)})
             plt.close(fig)

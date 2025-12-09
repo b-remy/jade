@@ -3,6 +3,7 @@ model:
   name: "JADE_B_16"
   in_channels: 5
   input_size: 128
+  num_cosmo_tokens: 4
 
 # Training configuration
 training:
@@ -35,14 +36,15 @@ ema:
 
 # Diffusion configuration
 diffusion:
-  sigma_min: 0.01
-  sigma_max: 50.0
+  model: "linear"
+  # sigma_min: 0.01
+  # sigma_max: 50.0
   time_distribution: "logit" #"beta"  # or "uniform"
   mu: -0.8
   sigma: 0.8
-  beta_a: 3.0
-  beta_b: 3.0
-  weight_type: "inverse_sigma_squared_plus_one"
+  # beta_a: 3.0
+  # beta_b: 3.0
+  # weight_type: "inverse_sigma_squared_plus_one"
 
 # Data configuration
 data:
@@ -61,9 +63,9 @@ logging:
   project: "jade"
   entity: "b-remy"
   log_every_n_steps: 10
-  visualize_every_n_epochs: 1
+  visualize_every_n_epochs: 10
 
 # Loss configuration
 loss:
   type: "v-loss" # "x-loss"
-  lambda_cosmo: 1.0
+  lambda_cosmo: 0.25

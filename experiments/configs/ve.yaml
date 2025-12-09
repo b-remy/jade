@@ -3,6 +3,7 @@ model:
   name: "JADE_B_16_VE"
   in_channels: 5
   input_size: 128
+  num_cosmo_tokens: 4
 
 # Training configuration
 training:
@@ -42,14 +43,14 @@ diffusion:
   sigma_max: 50.0   # Maximum noise level at t=1
   
   # Time distribution - keep your logit distribution
-  time_distribution: "logit"  # Options: "logit", "beta", "uniform"
-  mu: -0.8
-  sigma: 0.8
+  # time_distribution: "logit"  # Options: "logit", "beta", "uniform"
+  # mu: -0.8
+  # sigma: 0.8
   
   # Alternative time distributions (if you want to try):
-  # time_distribution: "beta"
-  # beta_a: 3.0
-  # beta_b: 3.0
+  time_distribution: "beta"
+  beta_a: 3.0
+  beta_b: 3.0
   
   # Loss weighting function
   # "inverse_sigma_squared_plus_one" gives w(t) = 1/sigma(t)^2 + 1
@@ -78,7 +79,7 @@ logging:
 # Loss configuration - VARIANCE EXPLODING LOSSES
 loss:
   type: "x-loss"  # Options for VE: "x-loss" (denoise to x_0), "eps-loss" (predict noise)
-  lambda_cosmo: 1.0
+  lambda_cosmo: 0.25 # 1.0
 
 # Notes:
 # - VE mode uses: xt = x + sigma(t) * z, where sigma(t) = sigma_min * (sigma_max/sigma_min)^t

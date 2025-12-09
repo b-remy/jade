@@ -1157,7 +1157,7 @@ def JADE_B_16(rngs, cosmo_dim=6, **kwargs):
     return JADE(
         depth=12, hidden_size=768, num_heads=12,
         bottleneck_dim=128,
-        cosmo_dim=cosmo_dim, num_cosmo_tokens=1,
+        cosmo_dim=cosmo_dim,
         rngs=rngs, **kwargs
     )
 
