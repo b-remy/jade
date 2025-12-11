@@ -3,7 +3,6 @@ model:
   name: "JADE_B_16_VE"
   in_channels: 5
   input_size: 128
-  num_cosmo_tokens: 4
 
 # Training configuration
 training:
@@ -40,7 +39,7 @@ diffusion:
   
   # Noise schedule parameters (geometric interpolation)
   sigma_min: 0.01   # Minimum noise level at t=0
-  sigma_max: 50.0   # Maximum noise level at t=1
+  sigma_max: 10.0   # Maximum noise level at t=1
   
   # Time distribution - keep your logit distribution
   # time_distribution: "logit"  # Options: "logit", "beta", "uniform"
@@ -79,7 +78,7 @@ logging:
 # Loss configuration - VARIANCE EXPLODING LOSSES
 loss:
   type: "x-loss"  # Options for VE: "x-loss" (denoise to x_0), "eps-loss" (predict noise)
-  lambda_cosmo: 0.25 # 1.0
+  lambda_cosmo: 1.0 
 
 # Notes:
 # - VE mode uses: xt = x + sigma(t) * z, where sigma(t) = sigma_min * (sigma_max/sigma_min)^t

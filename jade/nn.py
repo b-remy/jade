@@ -860,21 +860,26 @@ def JiT_B_16(rngs, **kwargs):
     )
 
 class CosmologyEmbedder(nnx.Module):
-    """Embeds cosmological parameters into transformer tokens (no positional encoding)."""
+    """Embeds cosmological parameters - one token per parameter with learnable positions."""
     
-    def __init__(self, cosmo_dim, hidden_size, num_tokens=1, rngs=None):
+    def __init__(self, cosmo_dim, hidden_size, rngs=None):
         """
         Args:
             cosmo_dim: number of cosmological parameters (e.g., 6)
             hidden_size: transformer hidden dimension
-            num_tokens: number of tokens to represent cosmology
             rngs: random number generator
         """
-        self.num_tokens = num_tokens
+        keys = jax.random.split(rngs(), 2)
+        
         self.cosmo_dim = cosmo_dim
         
-        # Project cosmology parameters to token embeddings
-        self.proj = nnx.Linear(cosmo_dim, hidden_size * num_tokens, rngs=rngs)
+        # Project each parameter independently to a token
+        self.proj = nnx.Linear(1, hidden_size, rngs=nnx.Rngs(keys[0]))
+        
+        # Learnable positional embedding for each parameter
+        self.param_pos_embed = nnx.Param(
+            jax.random.normal(keys[1], (cosmo_dim, hidden_size)) * 0.02
+        )
     
     def __call__(self, cosmo):
         """
@@ -882,11 +887,15 @@ class CosmologyEmbedder(nnx.Module):
             cosmo: cosmological parameters (cosmo_dim,)
         
         Returns:
-            cosmo tokens (num_tokens, hidden_size)
+            cosmo tokens (cosmo_dim, hidden_size)
         """
-        # Project to token space - no positional encoding
-        tokens = self.proj(cosmo)
-        tokens = tokens.reshape(self.num_tokens, -1)
+        # Expand each parameter to a token
+        # cosmo: (6,) -> (6, 1) -> each goes through proj -> (6, hidden_size)
+        tokens = jax.vmap(self.proj)(cosmo[:, None])  # (cosmo_dim, hidden_size)
+        
+        # Add learnable positional encoding for each parameter
+        tokens = tokens + self.param_pos_embed.value
+        
         return tokens
 
 class CosmologyPredictor(nnx.Module):
@@ -900,29 +909,27 @@ class CosmologyPredictor(nnx.Module):
             rngs: random number generator
         """
         keys = jax.random.split(rngs(), 2)
-        key_norm = nnx.Rngs(keys[0])
-        key_linear = nnx.Rngs(keys[1])
         
-        self.norm = RMSNorm(hidden_size, rngs=key_norm)
-        self.proj = nnx.Linear(hidden_size, cosmo_dim, rngs=key_linear)
+        self.cosmo_dim = cosmo_dim
+        self.norm = RMSNorm(hidden_size, rngs=nnx.Rngs(keys[0]))
+        
+        # Project each token back to a scalar parameter
+        self.proj = nnx.Linear(hidden_size, 1, rngs=nnx.Rngs(keys[1]))
     
     def __call__(self, cosmo_tokens):
         """
         Args:
-            cosmo_tokens: (num_tokens, hidden_size)
+            cosmo_tokens: (cosmo_dim, hidden_size)
         
         Returns:
             predicted cosmology (cosmo_dim,)
         """
-        # If multiple tokens, average pool
-        if cosmo_tokens.shape[0] > 1:
-            token = jnp.mean(cosmo_tokens, axis=0)
-        else:
-            token = cosmo_tokens[0]
+        # Normalize each token
+        tokens = self.norm(cosmo_tokens)  # (cosmo_dim, hidden_size)
         
-        # Normalize and project to cosmology space
-        token = self.norm(token)
-        cosmo_pred = self.proj(token)
+        # Project each token back to a scalar
+        cosmo_pred = jax.vmap(self.proj)(tokens)  # (cosmo_dim, 1)
+        cosmo_pred = cosmo_pred.squeeze(-1)  # (cosmo_dim,)
         
         return cosmo_pred
 
@@ -945,7 +952,6 @@ class JADE(nnx.Module):
         proj_drop=0.0,
         bottleneck_dim=128,
         cosmo_dim=6,
-        num_cosmo_tokens=1,
         rngs=None
     ):
         """
@@ -961,7 +967,6 @@ class JADE(nnx.Module):
             proj_drop: projection dropout rate
             bottleneck_dim: bottleneck dimension in patch embedding
             cosmo_dim: number of cosmological parameters to denoise
-            num_cosmo_tokens: number of tokens to represent cosmology
             rngs: random number generator (will be split for each component)
         """
         self.in_channels = in_channels
@@ -971,10 +976,9 @@ class JADE(nnx.Module):
         self.hidden_size = hidden_size
         self.input_size = input_size
         self.cosmo_dim = cosmo_dim
-        self.num_cosmo_tokens = num_cosmo_tokens
         
         # Split RNG for different components to ensure different initializations
-        rng_keys = jax.random.split(rngs(), depth + 6)  # depth blocks + 5 other components
+        rng_keys = jax.random.split(rngs(), depth + 6)  # depth blocks + 6 other components
         
         rngs_t_embedder = nnx.Rngs(rng_keys[0])
         rngs_x_embedder = nnx.Rngs(rng_keys[1])
@@ -983,13 +987,13 @@ class JADE(nnx.Module):
         rngs_final = nnx.Rngs(rng_keys[4])
         rngs_cosmo_head = nnx.Rngs(rng_keys[5])
         rngs_blocks = [nnx.Rngs(rng_keys[6 + i]) for i in range(depth)]
-
+        
         # Time embedder (diffusion timestep)
         self.t_embedder = TimestepEmbedder(hidden_size, rngs=rngs_t_embedder)
         
-        # Cosmology embedder (noisy cosmo → tokens, NO positional encoding)
+        # Cosmology embedder (cosmo_dim parameters → cosmo_dim tokens)
         self.cosmo_embedder = CosmologyEmbedder(
-            cosmo_dim, hidden_size, num_cosmo_tokens, rngs=rngs_cosmo_embedder
+            cosmo_dim, hidden_size, rngs=rngs_cosmo_embedder
         )
         
         # Field patch embedding
@@ -998,7 +1002,7 @@ class JADE(nnx.Module):
             bias=True, rngs=rngs_x_embedder
         )
         
-        # Fixed sin-cos positional embeddings for field patches (WITH positional encoding)
+        # Fixed sin-cos positional embeddings for field patches
         num_patches = self.x_embedder.num_patches
         pos_embed = get_2d_sincos_pos_embed(
             hidden_size, int(num_patches ** 0.5),
@@ -1006,14 +1010,14 @@ class JADE(nnx.Module):
         )
         self.pos_embed = nnx.Param(jnp.array(pos_embed, dtype=jnp.float32))
         
-        # RoPE for the full sequence (cosmo tokens + field patches)
+        # RoPE for the full sequence (cosmo_dim tokens + field patches)
         half_head_dim = hidden_size // num_heads // 2
         hw_seq_len = input_size // patch_size
         
         self.feat_rope = VisionRotaryEmbeddingFast(
             dim=half_head_dim,
             pt_seq_len=hw_seq_len,
-            num_cls_token=num_cosmo_tokens,
+            num_cls_token=cosmo_dim,  # Use cosmo_dim directly
             rngs=rngs_rope
         )
         
@@ -1055,6 +1059,10 @@ class JADE(nnx.Module):
         self.cosmo_embedder.proj.kernel.value = jax.random.normal(
             init_keys[2], self.cosmo_embedder.proj.kernel.value.shape
         ) * 0.02
+        self.cosmo_embedder.proj.bias.value = jnp.zeros_like(self.cosmo_embedder.proj.bias.value)
+        
+        # Initialize cosmology positional embeddings (already initialized in __init__ with std=0.02)
+        # No need to re-initialize param_pos_embed
         
         # Initialize timestep embedder MLPs (normal with std=0.02)
         self.t_embedder.linear1.kernel.value = jax.random.normal(
@@ -1076,8 +1084,10 @@ class JADE(nnx.Module):
         self.field_head.linear.kernel.value = jnp.zeros_like(self.field_head.linear.kernel.value)
         self.field_head.linear.bias.value = jnp.zeros_like(self.field_head.linear.bias.value)
         
-        # Zero-out cosmology output head
-        self.cosmo_head.proj.kernel.value = jnp.zeros_like(self.cosmo_head.proj.kernel.value)
+        # Initialize cosmology output head with small random weights (CHANGED from zeros)
+        self.cosmo_head.proj.kernel.value = jax.random.normal(
+            init_keys[5], self.cosmo_head.proj.kernel.value.shape
+        ) * 0.02  # Small random initialization instead of zeros
         self.cosmo_head.proj.bias.value = jnp.zeros_like(self.cosmo_head.proj.bias.value)
     
     def unpatchify(self, x, p):
@@ -1123,10 +1133,10 @@ class JADE(nnx.Module):
         t_emb = self.t_embedder(t)[0]  # (hidden_size,)
         c = t_emb  # Just time conditioning
         
-        # Embed noisy cosmology as tokens (NO positional encoding)
-        cosmo_tokens = self.cosmo_embedder(cosmo)  # (num_cosmo_tokens, hidden_size)
+        # Embed noisy cosmology as tokens (cosmo_dim tokens with learnable positions)
+        cosmo_tokens = self.cosmo_embedder(cosmo)  # (cosmo_dim, hidden_size)
         
-        # Embed noisy field as patches (WITH positional encoding)
+        # Embed noisy field as patches (with fixed sin-cos positions)
         field_tokens = self.x_embedder(field)  # (num_patches, hidden_size)
         field_tokens = field_tokens + self.pos_embed.value
         
@@ -1138,8 +1148,8 @@ class JADE(nnx.Module):
             x = block(x, c, feat_rope=self.feat_rope, train=train)
         
         # Split back into cosmology and field tokens
-        cosmo_tokens_out = x[:self.num_cosmo_tokens]
-        field_tokens_out = x[self.num_cosmo_tokens:]
+        cosmo_tokens_out = x[:self.cosmo_dim]  # Use cosmo_dim directly
+        field_tokens_out = x[self.cosmo_dim:]
         
         # Predict denoised cosmology
         cosmo_pred = self.cosmo_head(cosmo_tokens_out)
@@ -1151,7 +1161,6 @@ class JADE(nnx.Module):
         return field_pred, cosmo_pred
 
 
-# Model variants
 def JADE_B_16(rngs, cosmo_dim=6, **kwargs):
     """Base model with 16x16 patches."""
     return JADE(
@@ -1166,7 +1175,7 @@ def JADE_L_16(rngs, cosmo_dim=6, **kwargs):
     return JADE(
         depth=24, hidden_size=1024, num_heads=16,
         bottleneck_dim=128, patch_size=16,
-        cosmo_dim=cosmo_dim, num_cosmo_tokens=2,
+        cosmo_dim=cosmo_dim,
         rngs=rngs, **kwargs
     )
 
@@ -1175,6 +1184,6 @@ def JADE_H_16(rngs, cosmo_dim=6, **kwargs):
     return JADE(
         depth=32, hidden_size=1280, num_heads=16,
         bottleneck_dim=256, patch_size=16,
-        cosmo_dim=cosmo_dim, num_cosmo_tokens=1,
+        cosmo_dim=cosmo_dim,
         rngs=rngs, **kwargs
     )

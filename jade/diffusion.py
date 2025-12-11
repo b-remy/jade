@@ -85,7 +85,7 @@ class Denoiser(nnx.Module):
         
         return xt, cosmot, t
     
-    def __call__(self, x, cosmo, t, train=True):
+    def __call__(self, x, cosmo, sigma_t, train=True):
         """Forward pass through the denoiser model.
         
         Args:
@@ -97,7 +97,21 @@ class Denoiser(nnx.Module):
         Returns:
             tuple: (x_pred, cosmo_pred) - predicted clean data
         """
-        return self.model(x, cosmo, t, train)
+
+        # Apply EDM preconditioning (sigma_data = 1.0 for standardized data)
+        c_skip = jnp.atleast_1d(1.0 / (sigma_t**2 + 1.0))
+        c_out = sigma_t / jnp.sqrt(sigma_t**2 + 1.0)
+        c_in = 1.0 / jnp.sqrt(sigma_t**2 + 1.0)
+        c_noise = 0.25 * jnp.log(sigma_t)
+        
+        # Forward with preconditioning
+        x_net, cosmo_net = self.model(c_in * x, c_in * cosmo, c_noise, train)
+        
+        # Apply output scaling and skip connection
+        x_pred = c_skip * x + c_out * x_net
+        cosmo_pred = c_skip * cosmo + c_out * cosmo_net
+        
+        return x_pred, cosmo_pred
     
     def loss_fn(self, x, cosmo, key, train=True, return_components=False):
         """Compute denoising loss.

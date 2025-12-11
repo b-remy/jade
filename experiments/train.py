@@ -320,10 +320,10 @@ def train(cfg):
         rngs=nnx.Rngs(cfg['training']['seed']), 
         in_channels=cfg['model']['in_channels'], 
         input_size=cfg['model']['input_size'],
-        num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
         patch_size=16
     )
 
+    model = Denoiser(model, cfg)
 
     params = nnx.state(model, nnx.Param)
     total = sum(x.size for x in jax.tree.leaves(params))
@@ -459,6 +459,8 @@ def train(cfg):
         else:
             return total_loss
 
+    loss_val = partial(loss_fn, train=False, return_components=True)
+
     @nnx.jit
     def train_step(model, optimizer, x, cosmo, key):
         loss_fn_ = partial(
@@ -537,7 +539,7 @@ def train(cfg):
             cosmo_val = batch["theta"]
             
             key, val_key = jax.random.split(key, 2)
-            loss_val = partial(loss_fn, train=False, return_components=True)
+            
             val_loss, (val_loss_x, val_loss_cosmo) = nnx.jit(loss_val)(
                 model, x_val, cosmo_val, val_key,
             )
@@ -570,8 +572,14 @@ def train(cfg):
         
         # if (epoch + 1) % 5 == 0:
             # Sample
-            denoiser = Denoiser(model, cfg)
-            x_samples, cosmo_samples = denoiser.generate(key, batch_size=6, x_shape=x_val.shape, cosmo_shape=cosmo_val.shape, use_ve=True)
+            # denoiser = Denoiser(model, cfg)
+            denoiser = model
+            x_samples, cosmo_samples = denoiser.generate(key, 
+                batch_size=6, 
+                x_shape=x_val.shape, 
+                cosmo_shape=cosmo_val.shape, 
+                use_ve=True
+                )
             fig = plot_samples(x_samples, cosmo_samples, n_samples=6)
             wandb.log({"samples": wandb.Image(fig)})
             plt.close(fig)
