@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from jade.nn import JADE_B_16, JADE_L_16
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD  # Import normalization stats
-from jade.diffusion import Denoiser
+from jade.diffusion import Denoiser, VESDE, DDPM
 from jade.utils import dump_model
 
 def sigma_fn(t, cfg):
@@ -232,7 +232,7 @@ def normalize_batch(batch):
     field_mean = FIELD_MEAN.reshape(1, 1, 1, -1)
     field_std = FIELD_STD.reshape(1, 1, 1, -1)
     # map_norm = (batch['map'] - field_mean) / field_std
-    map_norm = batch['map'] * 100.
+    map_norm = batch['map'] * 10.
     
     return {'map': map_norm, 'theta': theta_norm}
 
@@ -305,6 +305,8 @@ def train(cfg):
     dataset = load_from_disk(cfg['data']['dataset_path'])
     dataset = dataset.with_format("numpy")
 
+    # dataset = dataset.train_test_split(test_size=0.1)["test"]
+    
     dataset = dataset.train_test_split(
         test_size=cfg['data']['val_split'], 
         seed=cfg['data']['shuffle_seed']
@@ -316,16 +318,19 @@ def train(cfg):
     print(f"Val samples: {len(ds_val)}")
 
     # Model initialization
-    model = JADE_B_16(
+    model_ = JADE_B_16(
         rngs=nnx.Rngs(cfg['training']['seed']), 
         in_channels=cfg['model']['in_channels'], 
         input_size=cfg['model']['input_size'],
         patch_size=16
     )
 
-    model = Denoiser(model, cfg)
+    model = Denoiser(model_, cfg)
 
+    VE = VESDE(sigma_min=cfg['diffusion']['sigma_min'], sigma_max=cfg['diffusion']['sigma_max'])
+    
     params = nnx.state(model, nnx.Param)
+
     total = sum(x.size for x in jax.tree.leaves(params))
     print(f"Total parameters: {total:,}")
 
@@ -572,14 +577,16 @@ def train(cfg):
         
         # if (epoch + 1) % 5 == 0:
             # Sample
-            # denoiser = Denoiser(model, cfg)
-            denoiser = model
-            x_samples, cosmo_samples = denoiser.generate(key, 
-                batch_size=6, 
-                x_shape=x_val.shape, 
-                cosmo_shape=cosmo_val.shape, 
-                use_ve=True
-                )
+            sampler = DDPM(denoiser=model, vesde=VE)
+            keys = jax.random.split(key, 6)
+            x_samples, cosmo_samples = jax.vmap(sampler.generate)(keys)
+
+            # x_samples, cosmo_samples = model.generate(key, 
+            #     batch_size=6, 
+            #     x_shape=x_val.shape, 
+            #     cosmo_shape=cosmo_val.shape, 
+            #     use_ve=True
+            #     )
             fig = plot_samples(x_samples, cosmo_samples, n_samples=6)
             wandb.log({"samples": wandb.Image(fig)})
             plt.close(fig)

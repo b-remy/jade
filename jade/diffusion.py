@@ -99,11 +99,11 @@ class Denoiser(nnx.Module):
         """
 
         # Apply EDM preconditioning (sigma_data = 1.0 for standardized data)
-        c_skip = jnp.atleast_1d(1.0 / (sigma_t**2 + 1.0))
+        c_skip = 1.0 / (sigma_t**2 + 1.0)
         c_out = sigma_t / jnp.sqrt(sigma_t**2 + 1.0)
         c_in = 1.0 / jnp.sqrt(sigma_t**2 + 1.0)
         c_noise = 0.25 * jnp.log(sigma_t)
-        
+
         # Forward with preconditioning
         x_net, cosmo_net = self.model(c_in * x, c_in * cosmo, c_noise, train)
         
@@ -263,7 +263,7 @@ class Denoiser(nnx.Module):
     
     # ==================== Variance Exploding Sampling Methods ====================
     
-    @nnx.jit
+    # @nnx.jit
     def _ve_denoise_fn(self, xt, cosmot, sigma_t):
         """Model wrapper for VE sampling that takes sigma instead of t.
         
@@ -284,7 +284,7 @@ class Denoiser(nnx.Module):
         #if jnp.ndim(sigma_t) == 0:
         #    sigma_t = jnp.full((xt.shape[0],), sigma_t)
         
-        model_vmap = jax.vmap(self.model, in_axes=(0, 0, 0, None))
+        model_vmap = jax.vmap(self.__call__, in_axes=(0, 0, 0, None))
         x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, False)
         
         return x_pred, cosmo_pred
@@ -437,3 +437,51 @@ class Denoiser(nnx.Module):
         z_x, z_cosmo = self._euler_step(z_x, z_cosmo, t, t_next)
         
         return z_x, z_cosmo
+
+class DDPM(nnx.Module):
+    def __init__(self, denoiser: nnx.Module, vesde: VESDE):
+        """Initialize DDPM sampler with denoiser and VESDE.
+        
+        Args:
+            denoiser: Denoiser model
+            vesde: VESDE instance
+            cfg: Configuration dictionary
+        """
+        self.denoiser = denoiser
+        self.sde = vesde
+        
+    def _ddpm_step(self, xt, cosmot, t, s, key):
+        sigma_s, sigma_t = self.sde.sigma(s), self.sde.sigma(t)
+        tau = 1 - (sigma_s / sigma_t) ** 2
+        eps_x = jax.random.normal(key, xt.shape)
+        eps_cosmo = jax.random.normal(key, cosmot.shape)
+        
+        x_pred, cosmo_pred = self.denoiser(xt, cosmot, sigma_t)
+        
+        x_ = xt - tau * (xt - x_pred) + sigma_s * jnp.sqrt(tau) * eps_x
+        cosmo_ = cosmot - tau * (cosmot - cosmo_pred) + sigma_s * jnp.sqrt(tau) * eps_cosmo
+        
+        return x_, cosmo_
+
+    @nnx.jit
+    def generate(self, key):
+        t = 1.0
+        steps = 64
+        dt = jnp.asarray(t / steps)
+        time = jnp.linspace(t, dt, steps)
+
+        key_time, key_x, key_cosmo = jax.random.split(key, 3)
+
+        xt = jax.random.normal(key_x, (128,128,5)) * self.sde.sigma(1.0)
+        cosmot = jax.random.normal(key_cosmo, (6)) * self.sde.sigma(1.0)
+
+        keys = jax.random.split(key_time, steps)
+        
+        def f(in_t, t_key):
+            xt, cosmot = in_t
+            t, key = t_key
+            return self._ddpm_step(xt, cosmot, t, t - dt, key), None
+
+        (x0, cosmo0), _ = jax.lax.scan(f, (xt, cosmot), (time, keys))
+        
+        return self.denoiser(x0, cosmo0, self.sde.sigma(0.0))
