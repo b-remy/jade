@@ -98,20 +98,21 @@ class Denoiser(nnx.Module):
             tuple: (x_pred, cosmo_pred) - predicted clean data
         """
 
-        # Apply EDM preconditioning (sigma_data = 1.0 for standardized data)
-        c_skip = 1.0 / (sigma_t**2 + 1.0)
-        c_out = sigma_t / jnp.sqrt(sigma_t**2 + 1.0)
-        c_in = 1.0 / jnp.sqrt(sigma_t**2 + 1.0)
-        c_noise = 0.25 * jnp.log(sigma_t)
+        # # Apply EDM preconditioning (sigma_data = 1.0 for standardized data)
+        # c_skip = 1.0 / (sigma_t**2 + 1.0)
+        # c_out = sigma_t / jnp.sqrt(sigma_t**2 + 1.0)
+        # c_in = 1.0 / jnp.sqrt(sigma_t**2 + 1.0)
+        # c_noise = 0.25 * jnp.log(sigma_t)
 
-        # Forward with preconditioning
-        x_net, cosmo_net = self.model(c_in * x, c_in * cosmo, c_noise, train)
+        # # Forward with preconditioning
+        # x_net, cosmo_net = self.model(c_in * x, c_in * cosmo, c_noise, train)
         
-        # Apply output scaling and skip connection
-        x_pred = c_skip * x + c_out * x_net
-        cosmo_pred = c_skip * cosmo + c_out * cosmo_net
+        # # Apply output scaling and skip connection
+        # x_pred = c_skip * x + c_out * x_net
+        # cosmo_pred = c_skip * cosmo + c_out * cosmo_net
         
-        return x_pred, cosmo_pred
+        # return x_pred, cosmo_pred
+        return self.model(x, cosmo, sigma_t, train)
     
     def loss_fn(self, x, cosmo, key, train=True, return_components=False):
         """Compute denoising loss.
@@ -463,7 +464,7 @@ class DDPM(nnx.Module):
         
         return x_, cosmo_
 
-    @nnx.jit
+    # @nnx.jit
     def generate(self, key):
         t = 1.0
         steps = 64

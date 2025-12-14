@@ -1038,73 +1038,13 @@ class JADE(nnx.Module):
         
         self.initialize_weights()
     
-    # def initialize_weights(self):
-    #     """Initialize weights following diffusion model best practices."""
-        
-    #     # Create separate RNG keys for initialization
-    #     init_keys = jax.random.split(jax.random.PRNGKey(42), 10)
-        
-    #     # Initialize patch embeddings (Xavier uniform)
-    #     w1 = self.x_embedder.proj1.kernel.value
-    #     w1_flat = w1.reshape(w1.shape[0], -1)
-    #     w1_init = jax.nn.initializers.xavier_uniform()(init_keys[0], w1_flat.shape)
-    #     self.x_embedder.proj1.kernel.value = w1_init.reshape(w1.shape)
-        
-    #     w2 = self.x_embedder.proj2.kernel.value
-    #     w2_flat = w2.reshape(w2.shape[0], -1)
-    #     w2_init = jax.nn.initializers.xavier_uniform()(init_keys[1], w2_flat.shape)
-    #     self.x_embedder.proj2.kernel.value = w2_init.reshape(w2.shape)
-    #     self.x_embedder.proj2.bias.value = jnp.zeros_like(self.x_embedder.proj2.bias.value)
-        
-    #     # Initialize cosmology embedder (normal with std=0.02)
-    #     self.cosmo_embedder.proj.kernel.value = jax.random.normal(
-    #         init_keys[2], self.cosmo_embedder.proj.kernel.value.shape
-    #     ) * 0.02
-    #     self.cosmo_embedder.proj.bias.value = jnp.zeros_like(self.cosmo_embedder.proj.bias.value)
-        
-    #     # Initialize cosmology positional embeddings (already initialized in __init__ with std=0.02)
-    #     # No need to re-initialize param_pos_embed
-        
-    #     # Initialize timestep embedder MLPs (normal with std=0.02)
-    #     self.t_embedder.linear1.kernel.value = jax.random.normal(
-    #         init_keys[3], self.t_embedder.linear1.kernel.value.shape
-    #     ) * 0.02
-        
-    #     self.t_embedder.linear2.kernel.value = jax.random.normal(
-    #         init_keys[4], self.t_embedder.linear2.kernel.value.shape
-    #     ) * 0.02
-        
-    #     # Zero-out AdaLN modulation layers in blocks
-    #     for block in self.blocks:
-    #         block.ada_linear.kernel.value = jnp.zeros_like(block.ada_linear.kernel.value)
-    #         block.ada_linear.bias.value = jnp.zeros_like(block.ada_linear.bias.value)
-        
-    #     # Zero-out field output head
-    #     self.field_head.ada_linear.kernel.value = jnp.zeros_like(self.field_head.ada_linear.kernel.value)
-    #     self.field_head.ada_linear.bias.value = jnp.zeros_like(self.field_head.ada_linear.bias.value)
-    #     self.field_head.linear.kernel.value = jnp.zeros_like(self.field_head.linear.kernel.value)
-    #     self.field_head.linear.bias.value = jnp.zeros_like(self.field_head.linear.bias.value)
-        
-    #     # Initialize cosmology output head with small random weights (CHANGED from zeros)
-    #     self.cosmo_head.proj.kernel.value = jax.random.normal(
-    #         init_keys[5], self.cosmo_head.proj.kernel.value.shape
-    #     ) * 0.02  # Small random initialization instead of zeros
-    #     self.cosmo_head.proj.bias.value = jnp.zeros_like(self.cosmo_head.proj.bias.value)
-
-
     def initialize_weights(self):
-        """Initialize weights for preconditioned diffusion model.
+        """Initialize weights for standard diffusion (no preconditioning)."""
         
-        Key differences from standard diffusion:
-        - Output heads use small random init instead of zeros
-        - This allows gradient flow through the skip connections
-        - Following EDM (Karras et al. 2022) recommendations
-        """
         # Create separate RNG keys for initialization
         init_keys = jax.random.split(jax.random.PRNGKey(42), 10)
         
         # ==================== Patch Embeddings ====================
-        # Initialize patch embedding convolutions (Xavier uniform)
         w1 = self.x_embedder.proj1.kernel.value
         w1_flat = w1.reshape(w1.shape[0], -1)
         w1_init = jax.nn.initializers.xavier_uniform()(init_keys[0], w1_flat.shape)
@@ -1117,54 +1057,110 @@ class JADE(nnx.Module):
         self.x_embedder.proj2.bias.value = jnp.zeros_like(self.x_embedder.proj2.bias.value)
         
         # ==================== Cosmology Embedder ====================
-        # Initialize cosmology embedder projection (normal with std=0.02)
         self.cosmo_embedder.proj.kernel.value = jax.random.normal(
             init_keys[2], self.cosmo_embedder.proj.kernel.value.shape
         ) * 0.02
         self.cosmo_embedder.proj.bias.value = jnp.zeros_like(self.cosmo_embedder.proj.bias.value)
         
-        # Cosmology positional embeddings already initialized in __init__ with std=0.02
-        # No need to re-initialize param_pos_embed
-        
         # ==================== Timestep Embedder ====================
-        # Initialize timestep embedder MLPs (normal with std=0.02)
         self.t_embedder.linear1.kernel.value = jax.random.normal(
             init_keys[3], self.t_embedder.linear1.kernel.value.shape
         ) * 0.02
-        self.t_embedder.linear1.bias.value = jnp.zeros_like(self.t_embedder.linear1.bias.value)
+        self.t_embedder.linear1.bias.value = jnp.zeros_like(self.t_embedder.linear1.bias.value)  # ✅ ADDED
         
         self.t_embedder.linear2.kernel.value = jax.random.normal(
             init_keys[4], self.t_embedder.linear2.kernel.value.shape
         ) * 0.02
-        self.t_embedder.linear2.bias.value = jnp.zeros_like(self.t_embedder.linear2.bias.value)
+        self.t_embedder.linear2.bias.value = jnp.zeros_like(self.t_embedder.linear2.bias.value)  # ✅ ADDED
         
         # ==================== Transformer Blocks ====================
-        # Zero-out AdaLN modulation layers in blocks
-        # (This is fine - AdaLN gates start at zero)
         for block in self.blocks:
             block.ada_linear.kernel.value = jnp.zeros_like(block.ada_linear.kernel.value)
             block.ada_linear.bias.value = jnp.zeros_like(block.ada_linear.bias.value)
         
         # ==================== Field Output Head ====================
-        # ✅ CRITICAL FOR PRECONDITIONING: Small random init instead of zeros
-        
-        # AdaLN modulation can stay at zero
         self.field_head.ada_linear.kernel.value = jnp.zeros_like(self.field_head.ada_linear.kernel.value)
         self.field_head.ada_linear.bias.value = jnp.zeros_like(self.field_head.ada_linear.bias.value)
-        
-        # ✅ Output projection: Small random initialization
-        # This allows gradients to flow through the skip connection
-        self.field_head.linear.kernel.value = jax.random.normal(
-            init_keys[6], self.field_head.linear.kernel.value.shape
-        ) * 0.02  # Small random for preconditioned diffusion
+        self.field_head.linear.kernel.value = jnp.zeros_like(self.field_head.linear.kernel.value)
         self.field_head.linear.bias.value = jnp.zeros_like(self.field_head.linear.bias.value)
         
         # ==================== Cosmology Output Head ====================
-        # ✅ Small random initialization (already correct)
-        self.cosmo_head.proj.kernel.value = jax.random.normal(
-            init_keys[5], self.cosmo_head.proj.kernel.value.shape
-        ) * 0.02  # Small random initialization
+        self.cosmo_head.proj.kernel.value = jnp.zeros_like(self.cosmo_head.proj.kernel.value)
         self.cosmo_head.proj.bias.value = jnp.zeros_like(self.cosmo_head.proj.bias.value)
+
+    # def initialize_weights(self):
+    #     """Initialize weights for preconditioned diffusion model.
+        
+    #     Key differences from standard diffusion:
+    #     - Output heads use small random init instead of zeros
+    #     - This allows gradient flow through the skip connections
+    #     - Following EDM (Karras et al. 2022) recommendations
+    #     """
+    #     # Create separate RNG keys for initialization
+    #     init_keys = jax.random.split(jax.random.PRNGKey(42), 10)
+        
+    #     # ==================== Patch Embeddings ====================
+    #     # Initialize patch embedding convolutions (Xavier uniform)
+    #     w1 = self.x_embedder.proj1.kernel.value
+    #     w1_flat = w1.reshape(w1.shape[0], -1)
+    #     w1_init = jax.nn.initializers.xavier_uniform()(init_keys[0], w1_flat.shape)
+    #     self.x_embedder.proj1.kernel.value = w1_init.reshape(w1.shape)
+        
+    #     w2 = self.x_embedder.proj2.kernel.value
+    #     w2_flat = w2.reshape(w2.shape[0], -1)
+    #     w2_init = jax.nn.initializers.xavier_uniform()(init_keys[1], w2_flat.shape)
+    #     self.x_embedder.proj2.kernel.value = w2_init.reshape(w2.shape)
+    #     self.x_embedder.proj2.bias.value = jnp.zeros_like(self.x_embedder.proj2.bias.value)
+        
+    #     # ==================== Cosmology Embedder ====================
+    #     # Initialize cosmology embedder projection (normal with std=0.02)
+    #     self.cosmo_embedder.proj.kernel.value = jax.random.normal(
+    #         init_keys[2], self.cosmo_embedder.proj.kernel.value.shape
+    #     ) * 0.02
+    #     self.cosmo_embedder.proj.bias.value = jnp.zeros_like(self.cosmo_embedder.proj.bias.value)
+        
+    #     # Cosmology positional embeddings already initialized in __init__ with std=0.02
+    #     # No need to re-initialize param_pos_embed
+        
+    #     # ==================== Timestep Embedder ====================
+    #     # Initialize timestep embedder MLPs (normal with std=0.02)
+    #     self.t_embedder.linear1.kernel.value = jax.random.normal(
+    #         init_keys[3], self.t_embedder.linear1.kernel.value.shape
+    #     ) * 0.02
+    #     self.t_embedder.linear1.bias.value = jnp.zeros_like(self.t_embedder.linear1.bias.value)
+        
+    #     self.t_embedder.linear2.kernel.value = jax.random.normal(
+    #         init_keys[4], self.t_embedder.linear2.kernel.value.shape
+    #     ) * 0.02
+    #     self.t_embedder.linear2.bias.value = jnp.zeros_like(self.t_embedder.linear2.bias.value)
+        
+    #     # ==================== Transformer Blocks ====================
+    #     # Zero-out AdaLN modulation layers in blocks
+    #     # (This is fine - AdaLN gates start at zero)
+    #     for block in self.blocks:
+    #         block.ada_linear.kernel.value = jnp.zeros_like(block.ada_linear.kernel.value)
+    #         block.ada_linear.bias.value = jnp.zeros_like(block.ada_linear.bias.value)
+        
+    #     # ==================== Field Output Head ====================
+    #     # ✅ CRITICAL FOR PRECONDITIONING: Small random init instead of zeros
+        
+    #     # AdaLN modulation can stay at zero
+    #     self.field_head.ada_linear.kernel.value = jnp.zeros_like(self.field_head.ada_linear.kernel.value)
+    #     self.field_head.ada_linear.bias.value = jnp.zeros_like(self.field_head.ada_linear.bias.value)
+        
+    #     # ✅ Output projection: Small random initialization
+    #     # This allows gradients to flow through the skip connection
+    #     self.field_head.linear.kernel.value = jax.random.normal(
+    #         init_keys[6], self.field_head.linear.kernel.value.shape
+    #     ) * 0.02  # Small random for preconditioned diffusion
+    #     self.field_head.linear.bias.value = jnp.zeros_like(self.field_head.linear.bias.value)
+        
+    #     # ==================== Cosmology Output Head ====================
+    #     # ✅ Small random initialization (already correct)
+    #     self.cosmo_head.proj.kernel.value = jax.random.normal(
+    #         init_keys[5], self.cosmo_head.proj.kernel.value.shape
+    #     ) * 0.02  # Small random initialization
+    #     self.cosmo_head.proj.bias.value = jnp.zeros_like(self.cosmo_head.proj.bias.value)
         
     def unpatchify(self, x, p):
         """

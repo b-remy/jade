@@ -491,6 +491,8 @@ def train(cfg):
     best_val_loss = float('inf')
     step = 0
 
+    sampler = DDPM(denoiser=model, vesde=VE)
+
     for epoch in range(cfg['training']['num_epochs']):
         loader = ds_train.shuffle(seed=epoch).iter(
             batch_size=cfg['training']['batch_size'], 
@@ -577,8 +579,9 @@ def train(cfg):
         
         # if (epoch + 1) % 5 == 0:
             # Sample
-            sampler = DDPM(denoiser=model, vesde=VE)
-            keys = jax.random.split(key, 6)
+            
+            key, subkey = jax.random.split(key, 2)
+            keys = jax.random.split(subkey, 6)
             x_samples, cosmo_samples = jax.vmap(sampler.generate)(keys)
 
             # x_samples, cosmo_samples = model.generate(key, 
