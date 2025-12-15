@@ -3,6 +3,7 @@
 import os
 import argparse
 import yaml
+import gc
 
 import jax
 import jax.numpy as jnp
@@ -24,7 +25,7 @@ from tqdm import tqdm
 from jade.nn import JADE_B_16, JADE_L_16
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD  # Import normalization stats
 from jade.diffusion import Denoiser, VESDE, DDPM
-from jade.utils import dump_model
+from jade.utils import dump_model, load_model
 
 def sigma_fn(t, cfg):
     """Noise schedule function for variance exploding diffusion"""
@@ -318,29 +319,42 @@ def train(cfg):
     print(f"Val samples: {len(ds_val)}")
 
     # Model initialization
-    model_ = JADE_B_16(
+    model = JADE_B_16(
         rngs=nnx.Rngs(cfg['training']['seed']), 
         in_channels=cfg['model']['in_channels'], 
         input_size=cfg['model']['input_size'],
         patch_size=16
     )
 
-    model = Denoiser(model_, cfg)
+    model = Denoiser(model, cfg)
 
+    if cfg['start_from_checkpoint']:
+        print(f"Loading model from checkpoint: {cfg['params_path']}")
+
+        original_params = nnx.state(model, nnx.Param)
+
+        _, params = load_model(cfg['params_path'], f"{cfg['model']['name']}_latest")
+        _, ema_params = load_model(cfg['params_path'], f"{cfg['model']['name']}_ema_latest")
+        nnx.update(model, params)
+
+        del original_params
+        gc.collect()
+        jax.clear_caches()
+
+    else:
+        params = nnx.state(model, nnx.Param)
+        # EMA setup
+        if cfg['ema']['use_ema']:
+            ema_params = None  # <-- Start as None
+            print(f"EMA will be initialized after first epoch")
+        else:
+            ema_params = None
+            print("EMA disabled")
+    
     VE = VESDE(sigma_min=cfg['diffusion']['sigma_min'], sigma_max=cfg['diffusion']['sigma_max'])
     
-    params = nnx.state(model, nnx.Param)
-
     total = sum(x.size for x in jax.tree.leaves(params))
     print(f"Total parameters: {total:,}")
-
-    # EMA setup
-    if cfg['ema']['use_ema']:
-        ema_params = None  # <-- Start as None
-        print(f"EMA will be initialized after first epoch")
-    else:
-        ema_params = None
-        print("EMA disabled")
 
 
     # Calculate total training steps
@@ -352,7 +366,8 @@ def train(cfg):
     opt = create_optimizer(cfg, total_steps)
     optimizer = nnx.Optimizer(model, opt, wrt=nnx.Param)
 
-    def loss_fn(model, x, cosmo, key, train=True, return_components=False):
+    @nnx.jit
+    def loss_fn(model, x, cosmo, key):
 
         keys = jax.random.split(key, 3)
 
@@ -399,7 +414,7 @@ def train(cfg):
             raise ValueError(f"Unknown diffusion mode: {diffusion_mode}. Must be 'linear' or 'variance_exploding'")
 
         model_vmap = jax.vmap(model, in_axes=(0,0,0,None))
-        x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, train)
+        x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, True)
 
         # Compute losses based on diffusion mode and loss type
         if diffusion_mode == 'linear':
@@ -459,20 +474,18 @@ def train(cfg):
             loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
             loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
 
-        if return_components:
-            return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
-        else:
-            return total_loss
-
-    loss_val = partial(loss_fn, train=False, return_components=True)
+        # if return_components:
+        return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
+        # else:
+            # return total_loss
 
     @nnx.jit
     def train_step(model, optimizer, x, cosmo, key):
         loss_fn_ = partial(
             loss_fn, x=x, cosmo=cosmo, key=key, 
-            train=True, return_components=False
+            # return_components=False
         )
-        loss, grads = nnx.value_and_grad(loss_fn_)(model)
+        (loss,(_, _)), grads = nnx.value_and_grad(loss_fn_, has_aux=True)(model)
         
         optimizer.update(model, grads)
 
@@ -511,7 +524,7 @@ def train(cfg):
             loss = train_step(model, optimizer, x, cosmo, subkey)
             
             # Initialize EMA after first epoch
-            if cfg['ema']['use_ema'] and ema_params is None and epoch >= 1:
+            if cfg['ema']['use_ema'] and ema_params is None and epoch >= 1 and not cfg["start_from_checkpoint"]:
                 ema_params = jax.tree.map(lambda x: x.copy(), nnx.state(model, nnx.Param))
                 print(f"EMA initialized from trained model at epoch {epoch}")
             
@@ -547,8 +560,9 @@ def train(cfg):
             
             key, val_key = jax.random.split(key, 2)
             
-            val_loss, (val_loss_x, val_loss_cosmo) = nnx.jit(loss_val)(
-                model, x_val, cosmo_val, val_key,
+            val_loss, (val_loss_x, val_loss_cosmo) = loss_fn(
+                model, x_val, cosmo_val, val_key, 
+                # return_components=True
             )
             losses.append(val_loss)
             losses_x.append(val_loss_x)
