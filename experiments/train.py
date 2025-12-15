@@ -331,15 +331,10 @@ def train(cfg):
     if cfg['start_from_checkpoint']:
         print(f"Loading model from checkpoint: {cfg['params_path']}")
 
-        original_params = nnx.state(model, nnx.Param)
-
-        _, params = load_model(cfg['params_path'], f"{cfg['model']['name']}_latest")
+        # _, params = load_model(cfg['params_path'], f"{cfg['model']['name']}_latest")
         _, ema_params = load_model(cfg['params_path'], f"{cfg['model']['name']}_ema_latest")
-        nnx.update(model, params)
-
-        del original_params
-        gc.collect()
-        jax.clear_caches()
+        
+        nnx.update(model, ema_params)
 
     else:
         params = nnx.state(model, nnx.Param)
@@ -353,6 +348,7 @@ def train(cfg):
     
     VE = VESDE(sigma_min=cfg['diffusion']['sigma_min'], sigma_max=cfg['diffusion']['sigma_max'])
     
+    params = nnx.state(model, nnx.Param)
     total = sum(x.size for x in jax.tree.leaves(params))
     print(f"Total parameters: {total:,}")
 
