@@ -346,7 +346,7 @@ def train(cfg):
             ema_params = None
             print("EMA disabled")
     
-    VE = VESDE(sigma_min=cfg['diffusion']['sigma_min'], sigma_max=cfg['diffusion']['sigma_max'])
+    # VE = VESDE(sigma_min=cfg['diffusion']['sigma_min'], sigma_max=cfg['diffusion']['sigma_max'])
     
     params = nnx.state(model, nnx.Param)
     total = sum(x.size for x in jax.tree.leaves(params))
@@ -500,7 +500,7 @@ def train(cfg):
     best_val_loss = float('inf')
     step = 0
 
-    sampler = DDPM(denoiser=model, vesde=VE)
+    # sampler = DDPM(denoiser=model, vesde=VE)
 
     for epoch in range(cfg['training']['num_epochs']):
         loader = ds_train.shuffle(seed=epoch).iter(
@@ -591,15 +591,16 @@ def train(cfg):
             # Sample
             
             key, subkey = jax.random.split(key, 2)
-            keys = jax.random.split(subkey, 6)
-            x_samples, cosmo_samples = jax.vmap(sampler.generate)(keys)
+            # keys = jax.random.split(subkey, 6)
+            # x_samples, cosmo_samples = jax.vmap(sampler.generate)(keys)
 
-            # x_samples, cosmo_samples = model.generate(key, 
-            #     batch_size=6, 
-            #     x_shape=x_val.shape, 
-            #     cosmo_shape=cosmo_val.shape, 
-            #     use_ve=True
-            #     )
+            x_samples, cosmo_samples = model.generate(subkey, 
+                batch_size=6, 
+                x_shape=x_val.shape, 
+                cosmo_shape=cosmo_val.shape, 
+                use_ve=False
+                )
+
             fig = plot_samples(x_samples, cosmo_samples, n_samples=6)
             wandb.log({"samples": wandb.Image(fig)})
             plt.close(fig)

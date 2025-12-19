@@ -3,7 +3,6 @@ model:
   name: "JADE_B_16"
   in_channels: 5
   input_size: 128
-  num_cosmo_tokens: 4
 
 # Training configuration
 training:
@@ -68,4 +67,7 @@ logging:
 # Loss configuration
 loss:
   type: "v-loss" # "x-loss"
-  lambda_cosmo: 0.25
+  lambda_cosmo: 0.25 # 1.0
+
+start_from_checkpoint: false
+
