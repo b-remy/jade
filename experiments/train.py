@@ -232,8 +232,8 @@ def normalize_batch(batch):
     
     field_mean = FIELD_MEAN.reshape(1, 1, 1, -1)
     field_std = FIELD_STD.reshape(1, 1, 1, -1)
-    # map_norm = (batch['map'] - field_mean) / field_std
-    map_norm = batch['map'] * 10.
+    map_norm = (batch['map'] - field_mean) / field_std
+    # map_norm = batch['map'] * 10.
     
     return {'map': map_norm, 'theta': theta_norm}
 
