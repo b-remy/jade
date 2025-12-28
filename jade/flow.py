@@ -29,11 +29,11 @@ class PosteriorDenoiser(nnx.Module):
     def __call__(self, xt, cosmot, sigma_t, train: bool = False):
 
         cov_t = sigma_t ** 2
-    
+
         (x, cosmo), vjp = jax.vjp(lambda x, cosmo: self.model(x, cosmo, sigma_t, False), xt, cosmot)
-        
+   
         y, A = jax.linearize(Operator, x)
-        
+ 
         At_ = jax.linear_transpose(Operator, x)
         At = lambda x: next(iter(At_(x)))
 
@@ -50,5 +50,5 @@ class PosteriorDenoiser(nnx.Module):
         )
 
         (score, _) = vjp((At(v), jnp.zeros_like(cosmo)))
-        
+
         return x + cov_t * score, cosmo
