@@ -23,8 +23,9 @@ import wandb
 from tqdm import tqdm
 
 from jade.nn import JADE_B_16, JADE_L_16
-from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD  # Import normalization stats
-from jade.diffusion import Denoiser, VESDE, DDPM
+from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD
+from jade.flow import Denoiser
+from jade.sampling import EulerSampler
 from jade.utils import dump_model, load_model
 
 def sigma_fn(t, cfg):
@@ -346,8 +347,6 @@ def train(cfg):
             ema_params = None
             print("EMA disabled")
     
-    # VE = VESDE(sigma_min=cfg['diffusion']['sigma_min'], sigma_max=cfg['diffusion']['sigma_max'])
-    
     params = nnx.state(model, nnx.Param)
     total = sum(x.size for x in jax.tree.leaves(params))
     print(f"Total parameters: {total:,}")
@@ -500,8 +499,6 @@ def train(cfg):
     best_val_loss = float('inf')
     step = 0
 
-    # sampler = DDPM(denoiser=model, vesde=VE)
-
     for epoch in range(cfg['training']['num_epochs']):
         loader = ds_train.shuffle(seed=epoch).iter(
             batch_size=cfg['training']['batch_size'], 
@@ -591,15 +588,14 @@ def train(cfg):
             # Sample
             
             key, subkey = jax.random.split(key, 2)
-            # keys = jax.random.split(subkey, 6)
-            # x_samples, cosmo_samples = jax.vmap(sampler.generate)(keys)
+            
+            sampler = EulerSampler(denoiser=model, cfg=cfg)
+            
+            keys = jax.random.split(subkey, 2)
+            x_0 = jax.random.normal(keys[0], shape=(6, 128, 128, 5))
+            cosmo_0 = jax.random.normal(keys[1], shape=(6, 6))
 
-            x_samples, cosmo_samples = model.generate(subkey, 
-                batch_size=6, 
-                x_shape=x_val.shape, 
-                cosmo_shape=cosmo_val.shape, 
-                use_ve=False
-                )
+            x_samples, cosmo_samples = jax.vmap(sampler)(x_0, cosmo_0)
 
             fig = plot_samples(x_samples, cosmo_samples, n_samples=6)
             wandb.log({"samples": wandb.Image(fig)})
