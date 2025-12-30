@@ -11,12 +11,25 @@ class Denoiser(nnx.Module):
         self.model = model
         self.cfg = cfg
     
-        
-    
     def __call__(self, x,  cosmo, sigma_t, train: bool = False):
         return self.model(x, cosmo, sigma_t, train)
 
-class PosteriorDenoiser(nnx.Module):
+    def x_pred(self, xt, cosmot, t, train: bool = False):
+        return self(xt, cosmot, t, train)
+
+    def v_pred(self, xt, cosmot, t, train: bool = False):
+        x_pred, cosmo_pred = self.x_pred(xt, cosmot, t, train)
+        
+        # Compute velocity: v = (x - z) / (1 - t)
+        t_broadcast_x = t
+        t_broadcast_cosmo = t
+        
+        v_x = (x_pred - xt) / jnp.clip(1.0 - t_broadcast_x, a_min=self.t_eps)
+        v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t_broadcast_cosmo, a_min=self.t_eps)
+        
+        return v_x, v_cosmo
+
+class PosteriorDenoiser(Denoiser):
     def __init__(self, model: nnx.Module, cfg: dict, gamma, sigma_gamma=1.0):
         self.model = model
         self.cfg = cfg
@@ -34,7 +47,7 @@ class PosteriorDenoiser(nnx.Module):
         # linear solver
         self.solve = jax.scipy.sparse.linalg.cg
         self.tol = 1e-3
-        self.maxiter = 1
+        self.maxiter = 3
 
         self.gamma = gamma
         self.cov_y = sigma_gamma ** 2
@@ -57,6 +70,9 @@ class PosteriorDenoiser(nnx.Module):
         # DPS
         cov_y_xt = lambda v: (self.cov_y*v) + cov_t*A(At(v))
 
+        # MMPS
+        #cov_y_xt = lambda v: cov_y*v + cov_t*A(*vjp(At(v)))                 
+        
         b = self.gamma - y
         
         v, _ = self.solve(
