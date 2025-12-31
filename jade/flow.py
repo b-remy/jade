@@ -31,18 +31,12 @@ class PosteriorDenoiser(Denoiser):
         self.model = model
         self.cfg = cfg
 
-        self.steps = cfg.get('sampling', {}).get('steps', 50)
-        self.method = cfg.get('sampling', {}).get('method', 'euler')  # 'euler', 'heun', or 'ddpm'
         self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.05)
         self.noise_scale = cfg.get('sampling', {}).get('noise_scale', 1.0)
-        
-        # Initialize VESDE for variance exploding methods
-        sigma_min = cfg.get('diffusion', {}).get('sigma_min', 0.01)
-        sigma_max = cfg.get('diffusion', {}).get('sigma_max', 50.0)
-        self.sde = VESDE(sigma_min=sigma_min, sigma_max=sigma_max)
 
         # linear solver
-        self.solve = jax.scipy.sparse.linalg.cg
+        # self.solve = jax.scipy.sparse.linalg.cg
+        self.solve = jax.scipy.sparse.linalg.gmres
         self.tol = 1e-3
         self.maxiter = 3
 
@@ -64,11 +58,11 @@ class PosteriorDenoiser(Denoiser):
         At = lambda x: next(iter(At_(x)))
 
         # DPS
-        cov_y_xt = lambda v: (self.cov_y*v) + cov_t*A(At(v))
+        # cov_y_xt = lambda v: (self.cov_y*v) + cov_t*A(At(v))
 
         # MMPS
-        #cov_y_xt = lambda v: cov_y*v + cov_t*A(*vjp(At(v)))                 
-        
+        cov_y_xt = lambda v: self.cov_y*v + cov_t*A(vjp((At(v), jnp.zeros(6)))[0])
+
         b = self.gamma - y
         
         v, _ = self.solve(
