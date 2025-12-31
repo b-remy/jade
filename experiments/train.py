@@ -589,7 +589,7 @@ def train(cfg):
             
             key, subkey = jax.random.split(key, 2)
             
-            sampler = EulerSampler(denoiser=model, cfg=cfg)
+            sampler = EulerSampler(model=model, num_steps=50)
             
             keys = jax.random.split(subkey, 2)
             x_0 = jax.random.normal(keys[0], shape=(6, 128, 128, 5))
