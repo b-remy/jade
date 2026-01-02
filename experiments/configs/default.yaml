@@ -70,4 +70,4 @@ loss:
   lambda_cosmo: 0.25 # 1.0
 
 start_from_checkpoint: false
-
+lap: 0

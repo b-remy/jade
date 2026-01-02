@@ -234,7 +234,6 @@ def normalize_batch(batch):
     field_mean = FIELD_MEAN.reshape(1, 1, 1, -1)
     field_std = FIELD_STD.reshape(1, 1, 1, -1)
     map_norm = (batch['map'] - field_mean) / field_std
-    # map_norm = batch['map'] * 10.
     
     return {'map': map_norm, 'theta': theta_norm}
 
@@ -499,8 +498,11 @@ def train(cfg):
     best_val_loss = float('inf')
     step = 0
 
-    for epoch in range(cfg['training']['num_epochs']):
-        loader = ds_train.shuffle(seed=epoch).iter(
+    lap = 0 if not cfg['start_from_checkpoint'] else cfg['lap']
+    num_epochs = cfg['training']['num_epochs']
+
+    for epoch in range(num_epochs):
+        loader = ds_train.shuffle(seed=lap*num_epochs + epoch).iter(
             batch_size=cfg['training']['batch_size'], 
             drop_last_batch=True
         )
@@ -591,11 +593,12 @@ def train(cfg):
             
             sampler = EulerSampler(model=model, num_steps=50)
             
-            keys = jax.random.split(subkey, 2)
+            keys = jax.random.split(subkey, 3)
             x_0 = jax.random.normal(keys[0], shape=(6, 128, 128, 5))
             cosmo_0 = jax.random.normal(keys[1], shape=(6, 6))
 
-            x_samples, cosmo_samples = jax.vmap(sampler)(x_0, cosmo_0)
+            keys = jax.random.split(keys[2], 6)
+            x_samples, cosmo_samples = jax.vmap(sampler)(x_0, cosmo_0, keys)
 
             fig = plot_samples(x_samples, cosmo_samples, n_samples=6)
             wandb.log({"samples": wandb.Image(fig)})
