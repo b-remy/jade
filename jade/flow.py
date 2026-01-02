@@ -10,7 +10,10 @@ class Denoiser(nnx.Module):
     def __init__(self, model: nnx.Module, cfg: dict):
         self.model = model
         self.cfg = cfg
-    
+
+        self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.05)
+        self.noise_scale = cfg.get('sampling', {}).get('noise_scale', 1.0)
+
     def __call__(self, x,  cosmo, sigma_t, train: bool = False):
         return self.model(x, cosmo, sigma_t, train)
 
