@@ -6,7 +6,7 @@ from functools import partial
 from jade.lensing import Operator
 from jade.diffusion import VESDE
 
-class Denoiser(nnx.Module):
+class FlowDenoiser(nnx.Module):
     def __init__(self, model: nnx.Module, cfg: dict):
         self.model = model
         self.cfg = cfg
@@ -29,7 +29,19 @@ class Denoiser(nnx.Module):
 
         return v_x, v_cosmo
 
-class PosteriorDenoiser(Denoiser):
+    def forward_coupling(self, x, cosmo, t, key):
+        alpha_t = 1.0 - t
+        sigma_t = t
+
+        noise_x = jax.random.normal(key, shape=x.shape)
+        noise_cosmo = jax.random.normal(key, shape=cosmo.shape)
+
+        xt = alpha_t * x + sigma_t * noise_x
+        cosmot = alpha_t * cosmo + sigma_t * noise_cosmo
+
+        return xt, cosmot
+
+class PosteriorDenoiser(FlowDenoiser):
     def __init__(self, model: nnx.Module, cfg: dict, gamma, sigma_gamma=1.0):
         self.model = model
         self.cfg = cfg
@@ -78,3 +90,43 @@ class PosteriorDenoiser(Denoiser):
         (score, _) = vjp((At(v), jnp.zeros_like(cosmo)))
 
         return x + cov_t * score, cosmo
+
+
+class FlowLoss(nnx.Module):
+    def __init__(self, cfg: dict):
+        self.t_eps = cfg["diffusion"]["t_eps"]
+        self.mu = cfg['diffusion']['mu']
+        self.sigma= cfg['diffusion']['sigma']
+
+    def __call__(self, model, x, cosmo, key, lambda_cosmo, train: bool = False):
+
+        mu = self.mu
+        sigma = self.sigma
+        s = (jax.random.normal(key, shape=x.shape[:1]) + mu) * sigma
+        t = jax.nn.sigmoid(s)
+
+        alpha_t = t
+        sigma_t = 1 - t
+
+        noise_x = jax.random.normal(key, shape=x.shape)
+        noise_cosmo = jax.random.normal(key, shape=cosmo.shape)
+
+        xt = alpha_t[:,None,None,None] * x + sigma_t[:,None,None,None] * noise_x
+        cosmot = alpha_t[:,None] * cosmo + sigma_t[:,None] * noise_cosmo
+
+        x_pred, cosmo_pred = jax.vmap(model.x_pred, in_axes=(0,0,0,None))(xt, cosmot, t, train)
+
+        vx = (x - xt) / jnp.clip((1 - t[:,None,None,None]), a_min=0.05)
+        vx_pred = (x_pred - xt) / jnp.clip((1 - t[:,None,None,None]), a_min=0.05) 
+
+        vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[:,None]), a_min=0.05)
+        vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[:,None]), a_min=0.05)
+        
+        loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
+        loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
+
+        total_loss = loss_x + lambda_cosmo * loss_cosmo
+        
+        total_loss = total_loss.mean()
+
+        return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))

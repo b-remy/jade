@@ -6,7 +6,7 @@ model:
 
 # Training configuration
 training:
-  num_epochs: 256
+  num_epochs: 512
   batch_size: 512
   seed: 42
   use_mixed_precision: true
@@ -41,6 +41,7 @@ diffusion:
   time_distribution: "logit" #"beta"  # or "uniform"
   mu: -0.8
   sigma: 0.8
+  t_eps: 0.05
   # beta_a: 3.0
   # beta_b: 3.0
   # weight_type: "inverse_sigma_squared_plus_one"
@@ -67,7 +68,7 @@ logging:
 # Loss configuration
 loss:
   type: "v-loss" # "x-loss"
-  lambda_cosmo: 0.25 # 1.0
+  lambda_cosmo: 0.1 # 1.0
 
 start_from_checkpoint: false
 lap: 0
