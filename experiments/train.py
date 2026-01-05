@@ -117,7 +117,7 @@ def train(cfg):
     dataset = load_from_disk(cfg['data']['dataset_path'])
     dataset = dataset.with_format("numpy")
 
-    dataset = dataset.train_test_split(test_size=0.1)["test"]
+    # dataset = dataset.train_test_split(test_size=0.1)["test"]
     
     dataset = dataset.train_test_split(
         test_size=cfg['data']['val_split'], 
