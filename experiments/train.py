@@ -22,9 +22,9 @@ import matplotlib.pyplot as plt
 import wandb
 from tqdm import tqdm
 
-from jade.nn import JADE_B_16, JADE_L_16
+from jade.nn import JADE_B_16, JADE_L_16, JADE_M_16 
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD
-from jade.flow import FlowDenoiser, FlowLoss
+from jade.flow import Denoiser, FlowLoss
 from jade.sampling import EulerSampler
 from jade.utils import dump_model, load_model, denormalize_fields, denormalize_cosmo, plot_denoiser, plot_samples
 
@@ -136,8 +136,21 @@ def train(cfg):
         input_size=cfg['model']['input_size'],
         patch_size=16
     )
+    # model = JADE_L_16(
+    #     rngs=nnx.Rngs(cfg['training']['seed']), 
+    #     in_channels=cfg['model']['in_channels'], 
+    #     input_size=cfg['model']['input_size'],
+    #     patch_size=16
+    # )
 
-    model = FlowDenoiser(model, cfg)
+    # model = JADE_M_16(
+    #     rngs=nnx.Rngs(cfg['training']['seed']), 
+    #     in_channels=cfg['model']['in_channels'], 
+    #     input_size=cfg['model']['input_size'],
+    #     patch_size=16
+    # )
+
+    model = Denoiser(model, cfg)
 
     if cfg['start_from_checkpoint']:
         print(f"Loading model from checkpoint: {cfg['params_path']}")

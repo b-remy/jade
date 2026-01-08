@@ -1301,11 +1301,21 @@ def JADE_B_16(rngs, cosmo_dim=6, **kwargs):
         rngs=rngs, **kwargs
     )
 
+def JADE_M_16(rngs, cosmo_dim=6, **kwargs):
+    """Large model with 16x16 patches."""
+    return JADE(
+        depth=16, hidden_size=896, num_heads=16,
+        bottleneck_dim=128, #patch_size=16,
+        cosmo_dim=cosmo_dim,
+        rngs=rngs, **kwargs
+    )
+
+
 def JADE_L_16(rngs, cosmo_dim=6, **kwargs):
     """Large model with 16x16 patches."""
     return JADE(
         depth=24, hidden_size=1024, num_heads=16,
-        bottleneck_dim=128, patch_size=16,
+        bottleneck_dim=128, #patch_size=16,
         cosmo_dim=cosmo_dim,
         rngs=rngs, **kwargs
     )

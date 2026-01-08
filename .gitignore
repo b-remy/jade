@@ -1,3 +1,9 @@
 .ipynb*
 .python*
 uv.lock
+*__pycache__*
+*.ipynb
+logs/
+wandb/
+*.slurm
+*egg-info

@@ -6,7 +6,7 @@ from functools import partial
 from jade.lensing import Operator
 from jade.diffusion import VESDE
 
-class FlowDenoiser(nnx.Module):
+class Denoiser(nnx.Module):
     def __init__(self, model: nnx.Module, cfg: dict):
         self.model = model
         self.cfg = cfg
@@ -24,8 +24,13 @@ class FlowDenoiser(nnx.Module):
         x_pred, cosmo_pred = self.x_pred(xt, cosmot, t, train)
         
         # Compute velocity: v = (x - z) / (1 - t)
-        v_x = (x_pred - xt) / jnp.clip(1.0 - t, a_min=self.t_eps)
-        v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, a_min=self.t_eps)
+
+        t_eps = 0.001
+        v_x = (x_pred - xt) / jnp.clip(1.0 - t, a_min=t_eps)
+        v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, a_min=t_eps)
+        
+        #v_x = (x_pred - xt) / jnp.clip(1.0 - t, a_min=self.t_eps)
+        #v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, a_min=self.t_eps)
 
         return v_x, v_cosmo
 
@@ -41,19 +46,20 @@ class FlowDenoiser(nnx.Module):
 
         return xt, cosmot
 
-class PosteriorDenoiser(FlowDenoiser):
+class PosteriorDenoiser(Denoiser):
     def __init__(self, model: nnx.Module, cfg: dict, gamma, sigma_gamma=1.0):
         self.model = model
         self.cfg = cfg
 
-        self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.05)
+        self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.001)
         self.noise_scale = cfg.get('sampling', {}).get('noise_scale', 1.0)
 
         # linear solver
-        # self.solve = jax.scipy.sparse.linalg.cg
-        self.solve = jax.scipy.sparse.linalg.gmres
+        self.solve = jax.scipy.sparse.linalg.cg
+        #self.solve = jax.scipy.sparse.linalg.gmres
+        #self.solve = jax.scipy.sparse.linalg.bicgstab
         self.tol = 1e-3
-        self.maxiter = 3
+        self.maxiter = 10
 
         self.gamma = gamma
         self.cov_y = sigma_gamma ** 2
