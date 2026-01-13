@@ -24,19 +24,14 @@ class Denoiser(nnx.Module):
         x_pred, cosmo_pred = self.x_pred(xt, cosmot, t, train)
         
         # Compute velocity: v = (x - z) / (1 - t)
-
-        t_eps = 0.001
-        v_x = (x_pred - xt) / jnp.clip(1.0 - t, a_min=t_eps)
-        v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, a_min=t_eps)
-        
-        #v_x = (x_pred - xt) / jnp.clip(1.0 - t, a_min=self.t_eps)
-        #v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, a_min=self.t_eps)
+        v_x = (x_pred - xt) / jnp.clip(1.0 - t, a_min=self.t_eps)
+        v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, a_min=self.t_eps)
 
         return v_x, v_cosmo
 
     def forward_coupling(self, x, cosmo, t, key):
-        alpha_t = 1.0 - t
-        sigma_t = t
+        alpha_t = t
+        sigma_t = 1.0 - t
 
         noise_x = jax.random.normal(key, shape=x.shape)
         noise_cosmo = jax.random.normal(key, shape=cosmo.shape)
@@ -66,21 +61,22 @@ class PosteriorDenoiser(Denoiser):
 
     def __call__(self, xt, cosmot, t, train: bool = False):
 
-        alpha_t = 1.0 - t
-        sigma_t = t
+        alpha_t = t
+        sigma_t = 1.0 - t
 
         cov_t = sigma_t**2 / jnp.clip(alpha_t, a_min=self.t_eps)
 
-        (x, cosmo), vjp = jax.vjp(lambda x, cosmo: self.model(x, cosmo, sigma_t, False), xt, cosmot)
+        (x, cosmo), vjp = jax.vjp(lambda x, cosmo: self.model(x, cosmo, t, False), xt, cosmot)
    
         y, A = jax.linearize(Operator, x)
  
         At_ = jax.linear_transpose(Operator, x)
         At = lambda x: next(iter(At_(x)))
 
+        
         # DPS
-        # cov_y_xt = lambda v: (self.cov_y*v) + cov_t*A(At(v))
-
+        #cov_y_xt = lambda v: (self.cov_y*v) + cov_t*A(At(v))
+        
         # MMPS
         cov_y_xt = lambda v: self.cov_y*v + cov_t*A(vjp((At(v), jnp.zeros(6)))[0])
 
@@ -94,10 +90,10 @@ class PosteriorDenoiser(Denoiser):
         )
 
         (score, _) = vjp((At(v), jnp.zeros_like(cosmo)))
-
+        
         return x + cov_t * score, cosmo
-
-
+        
+        
 class FlowLoss(nnx.Module):
     def __init__(self, cfg: dict):
         self.t_eps = cfg["diffusion"]["t_eps"]
