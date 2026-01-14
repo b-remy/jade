@@ -73,7 +73,7 @@ def main():
         obs = gamma + noise
 
         pdenoiser = PosteriorDenoiser(model=model, cfg=cfg, gamma=gamma, sigma_gamma=sigma_noise)
-        sampler = EulerSampler(pdenoiser, 50)
+        sampler = EulerSampler(pdenoiser, 256)
 
         keys = jax.random.split(key, 3)
         x_0 = jax.random.normal(keys[0], shape=(batch_size, 128, 128, 5))
@@ -93,7 +93,7 @@ def main():
     loader = dataset.iter(batch_size=batch_size)
 
     job_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
-    n_jobs = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 5))
+    n_jobs = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 20))
 
     print(f"Starting job {job_id} out of {n_jobs}")
 
@@ -144,8 +144,8 @@ def main():
 
     results = np.array(results)
     
-    np.save(f'true_cosmo_job_{job_id}.npy', data_batch["theta"])
-    np.save(f'cosmo_samples_job_{job_id}.npy', results)
+    np.save(f'tarp_results/256/true_cosmo_job_{job_id}.npy', data_batch["theta"])
+    np.save(f'tarp_results/256/cosmo_samples_job_{job_id}.npy', results)
 
     # # Save results for this job
     # with open(f'cosmo_samples_job_{job_id}.pkl', 'wb') as f:
