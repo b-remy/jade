@@ -38,11 +38,19 @@ class Sampler(nnx.Module):
         # Create pairs of (t, t_next)
         timestep_pairs_key = (timesteps[:-1], timesteps[1:], keys[:-1])
 
-        # Run the scan
-        final_carry, _ = jax.lax.scan(scan_body, init_carry, timestep_pairs_key)
-
+        # Run the ODE solver
+        (z_x, z_cosmo), _ = jax.lax.scan(scan_body, init_carry, timestep_pairs_key)
+        
         # Final Euler step
-        z_x, z_cosmo = final_carry
+        t, t_next = timesteps[-2], timesteps[-1]
+
+        v_x, v_cosmo = self.model.v_pred(z_x, z_cosmo, t, False)
+
+        dt_x = (t_next - t)
+        dt_cosmo = (t_next - t)
+        
+        z_x = z_x + dt_x * v_x
+        z_cosmo = z_cosmo + dt_cosmo * v_cosmo
         
         return z_x, z_cosmo
 
