@@ -73,7 +73,7 @@ def main():
         obs = gamma + noise
 
         pdenoiser = PosteriorDenoiser(model=model, cfg=cfg, gamma=gamma, sigma_gamma=sigma_noise)
-        sampler = EulerSampler(pdenoiser, 256)
+        sampler = EulerSampler(pdenoiser, 512)
 
         keys = jax.random.split(key, 3)
         x_0 = jax.random.normal(keys[0], shape=(batch_size, 128, 128, 5))
@@ -89,19 +89,22 @@ def main():
     dataset = load_from_disk("sbi_lens_lognormal")
     dataset = dataset.with_format("numpy")
     
-    batch_size = 100 # number of prior samples in the dataset per job
-    loader = dataset.iter(batch_size=batch_size)
-
     job_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     n_jobs = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 20))
 
     print(f"Starting job {job_id} out of {n_jobs}")
 
-     # Total number of iterations
-    total_iterations = 500
+    # Total number of iterations n_sims
+    # total_iterations = 500
+    total_iterations = 400
 
     # Calculate which iterations this job handles
+    # number of prior samples in the dataset per job
     iters_per_job = total_iterations // n_jobs
+
+    # batch_size = 100 # number of prior samples in the dataset per job
+    loader = dataset.iter(batch_size=iters_per_job)
+
     start_idx = job_id * iters_per_job
 
     # Last job handles any remainder
@@ -112,7 +115,8 @@ def main():
 
     print(f"Job {job_id}: Processing iterations {start_idx} to {end_idx-1}")
 
-    for i in range(job_id+1):    
+    data_batch = next(loader)
+    for _ in range(job_id):    
         data_batch = next(loader)        
 
      # Create base random key - use a fixed seed for reproducibility
@@ -121,7 +125,6 @@ def main():
     
     # Split keys for all iterations upfront
     # This ensures keys are identical regardless of how work is split
-    all_keys = jax.random.split(master_key, total_iterations)
     
     job_keys = jax.random.split(master_key, n_jobs)
     job_key = job_keys[job_id]
@@ -129,23 +132,31 @@ def main():
     key, _ = jax.random.split(job_key)
 
     # Process only this job's subset of iterations
-    results = []
-
-    for i in tqdm(range(start_idx, end_idx)):
-        post = []
+    results_cosmo = []
+    results_x = []
+    # for i in tqdm(range(start_idx, end_idx)):
+    for i in tqdm(range(iters_per_job)):
+        post_cosmo = []
+        post_x = []
         for n_batches in range(2):
             key, subkey = jax.random.split(key)
-            _, cosmo_samples = posterior_sampling(data_batch, i, subkey, batch_size=200)
-            post.append(cosmo_samples)
+            x_samples, cosmo_samples = posterior_sampling(data_batch, i, subkey, batch_size=200)
+            post_x.append(x_samples)
+            post_cosmo.append(cosmo_samples)
 
-        post = jnp.concatenate(post, axis=0)
+        post_cosmo = jnp.concatenate(post_cosmo, axis=0)
+        post_x = jnp.concatenate(post_x, axis=0)
 
-        results.append(np.array(post))
+        results_cosmo.append(np.array(post_cosmo))
+        results_x.append(np.array(post_x))
 
-    results = np.array(results)
-    
-    np.save(f'tarp_results/256/true_cosmo_job_{job_id}.npy', data_batch["theta"])
-    np.save(f'tarp_results/256/cosmo_samples_job_{job_id}.npy', results)
+    results_cosmo = np.array(results_cosmo)
+    results_x = np.array(results_x)
+
+    np.save(f'tarp_results/512/true_cosmo_job_{job_id}.npy', data_batch["theta"])
+    np.save(f'tarp_results/512/true_x_job_{job_id}.npy', data_batch["map"])
+    np.save(f'tarp_results/512/cosmo_samples_job_{job_id}.npy', results_cosmo)
+    np.save(f'tarp_results/512/x_samples_job_{job_id}.npy', results_x)
 
     # # Save results for this job
     # with open(f'cosmo_samples_job_{job_id}.pkl', 'wb') as f:
