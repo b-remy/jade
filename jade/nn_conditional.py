@@ -1,4 +1,24 @@
-class JADE_conditional(nnx.Module):
+import jax
+import jax.numpy as jnp
+from flax import nnx
+
+import numpy as np
+
+from einops import repeat, rearrange
+
+import math
+from .nn import (
+    TimestepEmbedder,
+    BottleneckPatchEmbed,
+    CosmologyEmbedder,
+    VisionRotaryEmbeddingFast,
+    JiTBlock,
+    FinalLayer,
+    CosmologyPredictor,
+    get_2d_sincos_pos_embed
+)
+
+class JADE(nnx.Module):
     """
     Joint denoising transformer for dark matter fields and cosmology with optional image conditioning.
     JADE: Joint Analysis of Density and Expansion.
@@ -124,7 +144,7 @@ class JADE_conditional(nnx.Module):
         if self.enable_cond_image:
             self.feat_rope_cond = VisionRotaryEmbeddingFast(
                 dim=half_head_dim,
-                pt_seq_len=hw_seq_len,
+                pt_seq_len=hw_seq_len * 2,  # cond + field
                 num_cls_token=cosmo_dim,  # Only skip cosmo, apply RoPE to cond+field
                 rngs=rngs_rope
             )
