@@ -7,3 +7,11 @@ THETA_STD = np.array([0.17090547, 0.00601253, 0.1402754 , 0.06292731, 0.08028358
 # lognormal field mean and std
 FIELD_MEAN = np.array([0., 0., 0., 0., 0.])
 FIELD_STD = np.array([0.00468968, 0.01021258, 0.01501551, 0.02049607, 0.02891253])
+
+# lsst noise level
+sigma_e = 0.26
+n_gal = 27 # galaxies per arcmin^2
+A_pix = 5.49 # arcsin^2
+N_s = n_gal * A_pix
+
+sigma_lsst = sigma_e / np.sqrt(N_s)

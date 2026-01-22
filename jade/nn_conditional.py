@@ -318,7 +318,7 @@ class JADE(nnx.Module):
         imgs = x.reshape(h * p, w * p, c)
         return imgs
     
-    def __call__(self, field, cosmo, t, cond_image=None, train=False):
+    def __call__(self, field, cosmo, t, cond=None, train=False):
         """
         Joint forward pass: denoise both field and cosmology with optional image conditioning.
         
@@ -326,7 +326,7 @@ class JADE(nnx.Module):
             field: noisy dark matter field (H, W, C)
             cosmo: noisy cosmological parameters (cosmo_dim,)
             t: diffusion timestep (scalar or array)
-            cond_image: conditioning image (H, W, C_cond), optional (can be None)
+            cond: conditioning image (H, W, C_cond), optional (can be None)
             train: training mode flag
         
         Returns:
@@ -355,12 +355,12 @@ class JADE(nnx.Module):
         token_list = [cosmo_tokens]
         
         # Track whether we're using conditioning for this call
-        using_cond = self.enable_cond_image and cond_image is not None
+        using_cond = self.enable_cond_image and cond is not None
         
         # Add conditioning image tokens if provided
         if using_cond:
             # Process conditioning image exactly like the input field
-            cond_tokens = self.cond_embedder(cond_image)  # (num_patches, hidden_size)
+            cond_tokens = self.cond_embedder(cond)  # (num_patches, hidden_size)
             
             # Add learnable positional embeddings (different from field)
             cond_tokens = cond_tokens + self.cond_pos_embed.value
@@ -420,9 +420,9 @@ class JADE(nnx.Module):
         
         return field_pred, cosmo_pred
 
-def JADE_C_B_16(rngs, cosmo_dim=6, enable_cond_image=True, cond_channels=1, **kwargs):
+def JADE_B_16(rngs, cosmo_dim=6, enable_cond_image=True, cond_channels=1, **kwargs):
     """Base model with 16x16 patches and optional image conditioning."""
-    return JADE_conditional(
+    return JADE(
         depth=12, hidden_size=768, num_heads=12,
         bottleneck_dim=128,
         cosmo_dim=cosmo_dim,
