@@ -413,9 +413,6 @@ def train(cfg):
             wandb.log({tag: wandb.Image(fig)})
             plt.close(fig)
         
-        # if (epoch + 1) % 5 == 0:
-            # Sample
-            
             key, subkey = jax.random.split(key, 2)
             
             sampler = EulerSampler(model=model, num_steps=50)

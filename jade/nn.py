@@ -734,53 +734,6 @@ class JiT(nnx.Module):
 
         self.initialize_weights()
 
-    # def initialize_weights(self):
-    #     """Initialize weights following the PyTorch implementation."""
-        
-    #     # Initialize patch embedding convolutions (Xavier uniform)
-    #     w1 = self.x_embedder.proj1.kernel.value
-    #     w1_flat = w1.reshape(w1.shape[0], -1)
-    #     w1_init = jax.nn.initializers.xavier_uniform()(
-    #         jax.random.PRNGKey(0), w1_flat.shape
-    #     )
-    #     self.x_embedder.proj1.kernel.value = w1_init.reshape(w1.shape)
-        
-    #     w2 = self.x_embedder.proj2.kernel.value
-    #     w2_flat = w2.reshape(w2.shape[0], -1)
-    #     w2_init = jax.nn.initializers.xavier_uniform()(
-    #         jax.random.PRNGKey(1), w2_flat.shape
-    #     )
-    #     self.x_embedder.proj2.kernel.value = w2_init.reshape(w2.shape)
-    #     self.x_embedder.proj2.bias.value = jnp.zeros_like(self.x_embedder.proj2.bias.value)
-        
-    #     # Initialize label embedding table (normal with std=0.02)
-    #     key = jax.random.PRNGKey(2)
-    #     self.y_embedder.embedding_table.embedding.value = jax.random.normal(
-    #         key, self.y_embedder.embedding_table.embedding.value.shape
-    #     ) * 0.02
-        
-    #     # Initialize timestep embedder MLPs (normal with std=0.02)
-    #     key = jax.random.PRNGKey(3)
-    #     self.t_embedder.linear1.kernel.value = jax.random.normal(
-    #         key, self.t_embedder.linear1.kernel.value.shape
-    #     ) * 0.02
-        
-    #     key = jax.random.PRNGKey(4)
-    #     self.t_embedder.linear2.kernel.value = jax.random.normal(
-    #         key, self.t_embedder.linear2.kernel.value.shape
-    #     ) * 0.02
-        
-    #     # Zero-out adaLN modulation layers in blocks
-    #     for block in self.blocks:
-    #         block.ada_linear.kernel.value = jnp.zeros_like(block.ada_linear.kernel.value)
-    #         block.ada_linear.bias.value = jnp.zeros_like(block.ada_linear.bias.value)
-        
-    #     # Zero-out final layer adaLN and linear
-    #     self.final_layer.ada_linear.kernel.value = jnp.zeros_like(self.final_layer.ada_linear.kernel.value)
-    #     self.final_layer.ada_linear.bias.value = jnp.zeros_like(self.final_layer.ada_linear.bias.value)
-    #     self.final_layer.linear.kernel.value = jnp.zeros_like(self.final_layer.linear.kernel.value)
-    #     self.final_layer.linear.bias.value = jnp.zeros_like(self.final_layer.linear.bias.value)
-    
     def unpatchify(self, x, p):
         """
         Convert patches back to image.
@@ -1148,78 +1101,6 @@ class JADE(nnx.Module):
         self.cosmo_head.proj.bias.value = jnp.zeros_like(
             self.cosmo_head.proj.bias.value
         )
-
-    # def initialize_weights(self):
-    #     """Initialize weights for JADE model."""
-        
-    #     # 1. Field patch embedding - proj1 (Xavier uniform)
-    #     w1 = self.x_embedder.proj1.kernel.value
-    #     w1_flat = w1.reshape(w1.shape[0], -1)
-    #     w1_init = jax.nn.initializers.xavier_uniform()(
-    #         jax.random.PRNGKey(0), w1_flat.shape
-    #     )
-    #     self.x_embedder.proj1.kernel.value = w1_init.reshape(w1.shape)
-        
-    #     # 2. Field patch embedding - proj2 (Xavier uniform)
-    #     w2 = self.x_embedder.proj2.kernel.value
-    #     w2_flat = w2.reshape(w2.shape[0], -1)
-    #     w2_init = jax.nn.initializers.xavier_uniform()(
-    #         jax.random.PRNGKey(1), w2_flat.shape
-    #     )
-    #     self.x_embedder.proj2.kernel.value = w2_init.reshape(w2.shape)
-    #     self.x_embedder.proj2.bias.value = jnp.zeros_like(self.x_embedder.proj2.bias.value)
-        
-    #     # 3. Timestep embedder - linear1 (normal, std=0.02)
-    #     key = jax.random.PRNGKey(2)
-    #     self.t_embedder.linear1.kernel.value = jax.random.normal(
-    #         key, self.t_embedder.linear1.kernel.value.shape
-    #     ) * 0.02
-        
-    #     # 4. Timestep embedder - linear2 (normal, std=0.02)
-    #     key = jax.random.PRNGKey(3)
-    #     self.t_embedder.linear2.kernel.value = jax.random.normal(
-    #         key, self.t_embedder.linear2.kernel.value.shape
-    #     ) * 0.02
-        
-    #     # 5. Cosmology embedder projection (normal, std=0.02)
-    #     key = jax.random.PRNGKey(4)
-    #     self.cosmo_embedder.proj.kernel.value = jax.random.normal(
-    #         key, self.cosmo_embedder.proj.kernel.value.shape
-    #     ) * 0.02
-    #     self.cosmo_embedder.proj.bias.value = jnp.zeros_like(
-    #         self.cosmo_embedder.proj.bias.value
-    #     )
-    #     # Note: param_pos_embed already initialized in __init__ with 0.02 scale
-        
-    #     # 6. Cosmology predictor projection (small scale for output stability)
-    #     key = jax.random.PRNGKey(5)
-    #     self.cosmo_head.proj.kernel.value = jax.random.normal(
-    #         key, self.cosmo_head.proj.kernel.value.shape
-    #     ) * 0.001  # Smaller scale for output head
-    #     self.cosmo_head.proj.bias.value = jnp.zeros_like(
-    #         self.cosmo_head.proj.bias.value
-    #     )
-        
-    #     # 7. Zero-out adaLN modulation layers in transformer blocks
-    #     for block in self.blocks:
-    #         block.ada_linear.kernel.value = jnp.zeros_like(block.ada_linear.kernel.value)
-    #         block.ada_linear.bias.value = jnp.zeros_like(block.ada_linear.bias.value)
-        
-    #     # 8. Zero-out field head adaLN modulation
-    #     self.field_head.ada_linear.kernel.value = jnp.zeros_like(
-    #         self.field_head.ada_linear.kernel.value
-    #     )
-    #     self.field_head.ada_linear.bias.value = jnp.zeros_like(
-    #         self.field_head.ada_linear.bias.value
-    #     )
-        
-    #     # 9. Zero-out field head output projection
-    #     self.field_head.linear.kernel.value = jnp.zeros_like(
-    #         self.field_head.linear.kernel.value
-    #     )
-    #     self.field_head.linear.bias.value = jnp.zeros_like(
-    #         self.field_head.linear.bias.value
-    #     )
 
     def unpatchify(self, x, p):
         """
