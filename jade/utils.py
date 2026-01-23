@@ -7,7 +7,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD
+from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD, sigma_lsst
 import itertools
 from astropy import units as u
 # from lenstools.statistics import ConvergenceMap
@@ -66,38 +66,12 @@ def plot_denoiser(x, cosmo, model, key, cfg):
     s = (jax.random.normal(keys[0], shape=x.shape[:1]) + mu) * sigma
     t = jax.nn.sigmoid(s)
 
-    # elif cfg['diffusion']['time_distribution'] == "beta":
-    #     t = jax.random.beta(
-    #         keys[0], 
-    #         a=cfg['diffusion']['beta_a'], 
-    #         b=cfg['diffusion']['beta_b'], 
-    #         shape=x.shape[:1]
-    #     )
-    # else:
-    #     t = jax.random.uniform(keys[0], shape=x.shape[:1])
-    
-    # # Get diffusion mode
-    # diffusion_mode = cfg['diffusion'].get('mode', 'linear')
-    
-    # # Use fixed t for visualization
-    # # t = t*0. + 0.1
-    
-    # if diffusion_mode == 'linear':
-    #     # Linear interpolant
-    #     xt = t[...,None,None,None] * x + (1 - t[...,None,None,None]) * jax.random.normal(keys[1], shape=x.shape)  
-    #     cosmot = t[...,None] * cosmo + (1 - t[...,None]) * jax.random.normal(keys[2], shape=cosmo.shape)
-    #     sigma_t = t
+    xt, cosmot = jax.vmap(model.forward_coupling, in_axes=(0,0,0,None))(x, cosmo, t, keys[1])
 
-    # elif diffusion_mode == 'variance_exploding' or diffusion_mode == 've':
-    #     # Variance exploding
-    #     sigma_t = sigma_fn(t, cfg)
-    #     xt = x + sigma_t[...,None,None,None] * jax.random.normal(keys[1], shape=x.shape)
-    #     cosmot = cosmo + sigma_t[...,None] * jax.random.normal(keys[2], shape=cosmo.shape)
-    
-    xt, cosmot = jax.vmap(model.forward_coupling)(x, cosmo, t, jax.random.split(keys[1], x.shape[0]))
+    cond = x + sigma_lsst * jax.random.normal(keys[2], shape=x.shape)
 
-    model_vmap = jax.vmap(model.x_pred, in_axes=(0,0,0,None))
-    x_pred, cosmo_pred = model_vmap(xt, cosmot, t, False)
+    model_vmap = jax.vmap(model.x_pred, in_axes=(0,0,0,0,None))
+    x_pred, cosmo_pred = model_vmap(xt, cosmot, t, cond, False)
 
     # Denormalize cosmological parameters for display
     def denormalize(cosmo_norm):

@@ -3,11 +3,13 @@ model:
   name: "JADE_B_16"
   in_channels: 5
   input_size: 128
+  enable_cond_image: false
+  cond_channels: 5
 
 # Training configuration
 training:
   num_epochs: 512
-  batch_size: 512
+  batch_size: 256
   seed: 42
   use_mixed_precision: true
   precision: "bfloat16"
@@ -49,7 +51,7 @@ diffusion:
 # Data configuration
 data:
   dataset_path: "sbi_lens_lognormal"
-  val_split: 0.1
+  val_split: 0.05 #0.1
   shuffle_seed: 42
 
 # Checkpoint configuration
