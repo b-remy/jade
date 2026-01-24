@@ -70,7 +70,7 @@ logging:
 # Loss configuration
 loss:
   type: "v-loss" # "x-loss"
-  lambda_cosmo: 0.1 # 1.0
+  lambda_cosmo: 0.01 # 1.0
 
 start_from_checkpoint: false
 lap: 0

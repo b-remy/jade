@@ -55,6 +55,7 @@ def normalize_batch(batch):
 
 @jax.jit
 def make_cond(x, key):
+    x = x * FIELD_STD.reshape(1, 1, 1, -1) + FIELD_MEAN.reshape(1, 1, 1, -1)
     cond = x + sigma_lsst * jax.random.normal(key, shape=x.shape)
     return cond
 
