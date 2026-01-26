@@ -4,7 +4,6 @@ from flax import nnx
 from functools import partial
 
 from jade.lensing import Operator
-from jade.diffusion import VESDE
 
 class Denoiser(nnx.Module):
     def __init__(self, model: nnx.Module, cfg: dict):
@@ -14,15 +13,15 @@ class Denoiser(nnx.Module):
         self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.05)
         self.noise_scale = cfg.get('sampling', {}).get('noise_scale', 1.0)
 
-    def __call__(self, x,  cosmo, sigma_t, train: bool = False):
-        return self.model(x, cosmo, sigma_t, train)
+    def __call__(self, x,  cosmo, t, cond=None, train: bool = False):
+        return self.model(x, cosmo, t, cond=cond, train=train)
 
-    def x_pred(self, xt, cosmot, t, train: bool = False):
-        return self(xt, cosmot, t, train)
+    def x_pred(self, xt, cosmot, t, cond=None, train: bool = False):
+        return self(xt, cosmot, t, cond=cond, train=train)
 
-    def v_pred(self, xt, cosmot, t, train: bool = False):
-        x_pred, cosmo_pred = self.x_pred(xt, cosmot, t, train)
-        
+    def v_pred(self, xt, cosmot, t, cond=None, train: bool = False):
+        x_pred, cosmo_pred = self.x_pred(xt, cosmot, t, cond=cond, train=train)
+
         # Compute velocity: v = (x - z) / (1 - t)
         v_x = (x_pred - xt) / jnp.clip(1.0 - t, a_min=self.t_eps)
         v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, a_min=self.t_eps)
@@ -59,14 +58,14 @@ class PosteriorDenoiser(Denoiser):
         self.gamma = gamma
         self.cov_y = sigma_gamma ** 2
 
-    def __call__(self, xt, cosmot, t, train: bool = False):
+    def __call__(self, xt, cosmot, t, train: bool = False, *args, **kwargs):
 
         alpha_t = t
         sigma_t = 1.0 - t
 
         cov_t = sigma_t**2 / jnp.clip(alpha_t, a_min=self.t_eps)
 
-        (x, cosmo), vjp = jax.vjp(lambda x, cosmo: self.model(x, cosmo, t, False), xt, cosmot)
+        (x, cosmo), vjp = jax.vjp(lambda x, cosmo: self.model(x, cosmo, t, None, False), xt, cosmot)
    
         y, A = jax.linearize(Operator, x)
  
@@ -100,7 +99,7 @@ class FlowLoss(nnx.Module):
         self.mu = cfg['diffusion']['mu']
         self.sigma= cfg['diffusion']['sigma']
 
-    def __call__(self, model, x, cosmo, key, lambda_cosmo, train: bool = False):
+    def __call__(self, model, x, cosmo, key, lambda_cosmo, train: bool = False, cond=None):
 
         mu = self.mu
         sigma = self.sigma
@@ -116,7 +115,7 @@ class FlowLoss(nnx.Module):
         xt = alpha_t[:,None,None,None] * x + sigma_t[:,None,None,None] * noise_x
         cosmot = alpha_t[:,None] * cosmo + sigma_t[:,None] * noise_cosmo
 
-        x_pred, cosmo_pred = jax.vmap(model.x_pred, in_axes=(0,0,0,None))(xt, cosmot, t, train)
+        x_pred, cosmo_pred = jax.vmap(model.x_pred, in_axes=(0,0,0,0, None))(xt, cosmot, t, cond, train)
 
         vx = (x - xt) / jnp.clip((1 - t[:,None,None,None]), a_min=0.05)
         vx_pred = (x_pred - xt) / jnp.clip((1 - t[:,None,None,None]), a_min=0.05) 

@@ -15,10 +15,10 @@ class Sampler(nnx.Module):
         self.model = model
         self.num_steps = num_steps 
 
-    def step(self, xt, cosmot, t, t_next, key=None):
+    def step(self, xt, cosmot, t, t_next, cond=None, key=None):
         raise NotImplementedError()
 
-    def __call__(self, x0, cosmo0, key=None):
+    def __call__(self, x0, cosmo0, cond=None, key=None):
         """
         x0: initial state
         """
@@ -29,7 +29,7 @@ class Sampler(nnx.Module):
         def scan_body(carry, t_pair_key):
             z_x, z_cosmo = carry
             t, t_next, key = t_pair_key
-            z_x_new, z_cosmo_new = self.step(z_x, z_cosmo, t, t_next, key=key)
+            z_x_new, z_cosmo_new = self.step(z_x, z_cosmo, t, t_next, cond=cond, key=key)
             return (z_x_new, z_cosmo_new), None
 
         # Initial state
@@ -44,7 +44,7 @@ class Sampler(nnx.Module):
         # Final Euler step
         t, t_next = timesteps[-2], timesteps[-1]
 
-        v_x, v_cosmo = self.model.v_pred(z_x, z_cosmo, t, False)
+        v_x, v_cosmo = self.model.v_pred(z_x, z_cosmo, t, cond=cond, train=False)
 
         dt_x = (t_next - t)
         dt_cosmo = (t_next - t)
@@ -56,7 +56,7 @@ class Sampler(nnx.Module):
 
 class EulerSampler(Sampler):
 
-    def step(self, xt, cosmot, t, t_next, **kwargs):
+    def step(self, xt, cosmot, t, t_next, cond=None, **kwargs):
         """
         xt: current state
         cosmot: current cosmology
@@ -64,7 +64,7 @@ class EulerSampler(Sampler):
         t_next: next time
         """
         
-        v_x, v_cosmo = self.model.v_pred(xt, cosmot, t, False)
+        v_x, v_cosmo = self.model.v_pred(xt, cosmot, t, cond=cond, train=False)
 
         dt_x = (t_next - t)
         dt_cosmo = (t_next - t)

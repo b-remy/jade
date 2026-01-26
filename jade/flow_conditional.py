@@ -46,12 +46,12 @@ class PosteriorDenoiser(Denoiser):
         self.model = model
         self.cfg = cfg
 
-        self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.001)
+        self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.05)
         self.noise_scale = cfg.get('sampling', {}).get('noise_scale', 1.0)
 
         # linear solver
-        self.solve = jax.scipy.sparse.linalg.cg
-        #self.solve = jax.scipy.sparse.linalg.gmres
+        #self.solve = jax.scipy.sparse.linalg.cg
+        self.solve = jax.scipy.sparse.linalg.gmres
         #self.solve = jax.scipy.sparse.linalg.bicgstab
         self.tol = 1e-3
         self.maxiter = 10
@@ -59,7 +59,7 @@ class PosteriorDenoiser(Denoiser):
         self.gamma = gamma
         self.cov_y = sigma_gamma ** 2
 
-    def __call__(self, xt, cosmot, t, train: bool = False):
+    def __call__(self, xt, cosmot, t, train: bool = False, *args, **kwargs):
 
         alpha_t = t
         sigma_t = 1.0 - t
