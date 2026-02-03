@@ -76,7 +76,7 @@ class EulerSampler(Sampler):
     
 class HeunSampler(Sampler):
 
-    def step(self, xt, cosmot, t, t_next, **kwargs):
+    def step(self, xt, cosmot, t, t_next, cond=None, **kwargs):
         """
         xt: current state
         cosmot: current cosmology
@@ -85,7 +85,7 @@ class HeunSampler(Sampler):
         """
 
         # First prediction at t
-        v_x_t, v_cosmo_t = self.model.v_pred(xt, cosmot, t, False)
+        v_x_t, v_cosmo_t = self.model.v_pred(xt, cosmot, t, cond=cond, train=False)
         
         dt_x = (t_next - t)
         dt_cosmo = (t_next - t)
@@ -95,7 +95,7 @@ class HeunSampler(Sampler):
         cosmo_euler = cosmot + dt_cosmo * v_cosmo_t
         
         # Second prediction at t_next
-        v_x_t_next, v_cosmo_t_next = self.model.v_pred(x_euler, cosmo_euler, t_next, False)
+        v_x_t_next, v_cosmo_t_next = self.model.v_pred(x_euler, cosmo_euler, t_next, cond=cond, train=False)
         
         # Average the two predictions
         v_x = 0.5 * (v_x_t + v_x_t_next)
