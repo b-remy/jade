@@ -1,0 +1,75 @@
+# Model configuration
+model:
+  name: "JADE_B_16"
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: false
+  cond_channels: 5
+  patch_size: 8
+
+# Training configuration
+training:
+  num_epochs: 320
+  batch_size: 128
+  seed: 42
+  use_mixed_precision: true
+  precision: "bfloat16"
+
+# Optimizer configuration
+optimizer:
+  type: "adamw"
+  learning_rate: 1e-5
+  weight_decay: 0. #1e-4
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+  
+  use_schedule: true
+  schedule:
+    init_value: 1e-3
+    end_value: 1e-6
+
+# EMA configuration
+ema:
+  use_ema: true
+  decay: 0.999
+
+# Diffusion configuration
+diffusion:
+  model: "linear"
+  # sigma_min: 0.01
+  # sigma_max: 50.0
+  time_distribution: "logit" #"beta"  # or "uniform"
+  mu: -0.8
+  sigma: 0.8
+  t_eps: 0.05
+  # beta_a: 3.0
+  # beta_b: 3.0
+  # weight_type: "inverse_sigma_squared_plus_one"
+
+# Data configuration
+data:
+  dataset_path: "sbi_lens_lognormal"
+  val_split: 0.05 #0.1
+  shuffle_seed: 42
+
+# Checkpoint configuration
+checkpoint:
+  dir: "checkpoints"
+  save_every_n_epochs: 1
+  keep_best: true
+
+# Logging configuration
+logging:
+  project: "jade"
+  entity: "b-remy"
+  log_every_n_steps: 10
+  visualize_every_n_epochs: 10
+
+# Loss configuration
+loss:
+  type: "v-loss" # "x-loss"
+  lambda_cosmo: 0.01 # 1.0
+
+start_from_checkpoint: false
+lap: 0

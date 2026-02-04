@@ -22,7 +22,8 @@ import matplotlib.pyplot as plt
 import wandb
 from tqdm import tqdm
 
-from jade.nn import JADE_B_16
+from jade.nn_one_token import JADE_B_16
+# from jade.nn_patch import JADE_B_16_mixed
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD, sigma_lsst
 from jade.flow import Denoiser, FlowLoss
 from jade.sampling import EulerSampler
@@ -63,14 +64,14 @@ def create_optimizer(cfg, total_steps):
     """Create optimizer with optional learning rate schedule"""
     
     if cfg['optimizer']['use_schedule']:
-        schedule = optax.warmup_cosine_decay_schedule(
+        schedule = optax.linear_schedule(
             init_value=cfg['optimizer']['schedule']['init_value'],
-            peak_value=cfg['optimizer']['schedule']['peak_value'],
-            warmup_steps=cfg['optimizer']['schedule']['warmup_steps'],
-            decay_steps=total_steps,
             end_value=cfg['optimizer']['schedule']['end_value'],
+            transition_steps=total_steps,
         )
         learning_rate = schedule
+
+
     else:
         learning_rate = cfg['optimizer']['learning_rate']
     
@@ -136,14 +137,29 @@ def train(cfg):
     print(f"Val samples: {len(ds_val)}")
 
     # Model initialization
-    model = JADE_B_16(
-        rngs=nnx.Rngs(cfg['training']['seed']), 
+    # model = JADE_B_16(
+    #     rngs=nnx.Rngs(cfg['training']['seed']), 
+    #     in_channels=cfg['model']['in_channels'], 
+    #     input_size=cfg['model']['input_size'],
+    #     enable_cond_image=cfg["model"]["enable_cond_image"],
+    #     cond_channels=cfg["model"]["cond_channels"],
+    #     patch_size=cfg["model"]["patch_size"]
+    #     )
+    
+    # model = JADE_B_16_mixed(rngs=nnx.Rngs(cfg['training']['seed']), 
+    #     in_channels=cfg['model']['in_channels'], 
+    #     input_size=cfg['model']['input_size'],
+    #     enable_cond_image=cfg["model"]["enable_cond_image"],
+    #     cond_channels=cfg["model"]["cond_channels"],
+    #     # patch_size=cfg["model"]["patch_size"]
+    #     )
+    model = JADE_B_16(rngs=nnx.Rngs(cfg['training']['seed']), 
         in_channels=cfg['model']['in_channels'], 
         input_size=cfg['model']['input_size'],
         enable_cond_image=cfg["model"]["enable_cond_image"],
         cond_channels=cfg["model"]["cond_channels"],
-        patch_size=16
-    )
+        patch_size=cfg["model"]["patch_size"]
+        )
     # model = JADE_L_16(
     #     rngs=nnx.Rngs(cfg['training']['seed']), 
     #     in_channels=cfg['model']['in_channels'], 
@@ -188,6 +204,7 @@ def train(cfg):
     print(f"Total training steps: {total_steps}")
 
     # Optimizer setup
+    total_steps = cfg['training']['num_epochs'] * (len(ds_train) // cfg['training']['batch_size'])
     opt = create_optimizer(cfg, total_steps)
     optimizer = nnx.Optimizer(model, opt, wrt=nnx.Param)
 
