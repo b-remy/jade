@@ -811,75 +811,56 @@ def JiT_B_16(rngs, **kwargs):
     )
 
 class CosmologyEmbedder(nnx.Module):
-    """Embeds cosmological parameters - one token per parameter with learnable positions."""
+    """Embeds cosmological parameters using Token Inflation (N tokens)."""
     
-    def __init__(self, cosmo_dim, hidden_size, rngs=None):
-        """
-        Args:
-            cosmo_dim: number of cosmological parameters (e.g., 6)
-            hidden_size: transformer hidden dimension
-            rngs: random number generator
-        """
+    def __init__(self, cosmo_dim, hidden_size, num_tokens=16, rngs=None):
         self.cosmo_dim = cosmo_dim
+        self.num_tokens = num_tokens
         
-        # Project all parameters to a single token
-        self.proj = nnx.Linear(cosmo_dim, hidden_size, rngs=rngs)
+        # Project 6 parameters into N * hidden_size
+        self.proj = nnx.Linear(cosmo_dim, num_tokens * hidden_size, rngs=rngs)
+        
+        # Learnable "slot" embeddings to break symmetry between the N tokens
+        self.token_pos_embed = nnx.Param(
+            jax.random.normal(rngs(), (num_tokens, hidden_size)) * 0.02
+        )
     
     def __call__(self, cosmo):
-        """
-        Args:
-            cosmo: cosmological parameters (cosmo_dim,)
+        # cosmo: (6,)
+        tokens = self.proj(cosmo) # (num_tokens * hidden_size,)
+        tokens = tokens.reshape(self.num_tokens, -1) # (num_tokens, hidden_size)
         
-        Returns:
-            cosmo tokens (cosmo_dim, hidden_size)
-        """
-        # Project all parameters to a single token
-        token = self.proj(cosmo)  # (hidden_size,)
-        token = jnp.expand_dims(token, 0)  # (1, hidden_size)
-        
-        return token
+        # Add slot-specific positional info
+        return tokens + self.token_pos_embed.value
 
 class CosmologyPredictor(nnx.Module):
-    """Predicts denoised cosmological parameters from a single token."""
+    """Predicts denoised cosmology by pooling information from N tokens."""
     
-    def __init__(self, hidden_size, cosmo_dim, rngs=None):
-        """
-        Args:
-            hidden_size: transformer hidden dimension
-            cosmo_dim: number of cosmological parameters
-            rngs: random number generator
-        """
-        keys = jax.random.split(rngs(), 2)
-        
+    def __init__(self, hidden_size, cosmo_dim, num_tokens=16, rngs=None):
         self.cosmo_dim = cosmo_dim
-        self.norm = RMSNorm(hidden_size, rngs=nnx.Rngs(keys[0]))
+        self.num_tokens = num_tokens
         
-        # Project single token back to all parameters
-        self.proj = nnx.Linear(hidden_size, cosmo_dim, rngs=nnx.Rngs(keys[1]))
+        # Post-transformer normalization
+        self.norm = RMSNorm(hidden_size, rngs=rngs)
+        
+        # Project pooled representation back to 6 parameters
+        self.proj = nnx.Linear(hidden_size, cosmo_dim, rngs=rngs)
     
-    def __call__(self, cosmo_token):
-        """
-        Args:
-            cosmo_token: (1, hidden_size)
+    def __call__(self, cosmo_tokens):
+        # cosmo_tokens: (num_tokens, hidden_size)
         
-        Returns:
-            predicted cosmology (cosmo_dim,)
-        """
-        # Remove first dimension and normalize
-        token = cosmo_token[0]  # (hidden_size,)
-        token = self.norm(token)  # (hidden_size,)
+        # Average information across all inflated tokens
+        pooled = jnp.mean(cosmo_tokens, axis=0) # (hidden_size,)
+        pooled = self.norm(pooled)
         
-        # Project back to all parameters
-        cosmo_pred = self.proj(token)  # (cosmo_dim,)
-        
-        return cosmo_pred
+        return self.proj(pooled) # (cosmo_dim,)
 
 class JADE(nnx.Module):
     def __init__(
         self,
         input_size=128,
         patch_size=8,           # For target field (fine detail)
-        cond_patch_size=16,     # For conditioning image (coarse is fine) ← NEW
+        cond_patch_size=16,     # For conditioning image (coarse is fine)
         in_channels=5,
         hidden_size=768,
         depth=12,
@@ -889,28 +870,11 @@ class JADE(nnx.Module):
         proj_drop=0.0,
         bottleneck_dim=128,
         cosmo_dim=6,
+        num_cosmo_tokens=16,    # ← Added inflation factor
         cond_channels=5,
         enable_cond_image=True,
         rngs=None
     ):
-        """
-        Args:
-            input_size: size of input images (assumes square)
-            patch_size: size of patches
-            in_channels: number of input field channels
-            hidden_size: transformer hidden dimension
-            depth: number of transformer blocks
-            num_heads: number of attention heads
-            mlp_ratio: MLP hidden dim ratio
-            attn_drop: attention dropout rate
-            proj_drop: projection dropout rate
-            bottleneck_dim: bottleneck dimension in patch embedding
-            cosmo_dim: number of cosmological parameters to denoise
-            cond_channels: number of conditioning image channels
-            enable_cond_image: whether to create conditioning components (set False to disable entirely)
-            rngs: random number generator (will be split for each component)
-        """
-        
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
@@ -918,13 +882,13 @@ class JADE(nnx.Module):
         self.hidden_size = hidden_size
         self.input_size = input_size
         self.cosmo_dim = cosmo_dim
+        self.num_cosmo_tokens = num_cosmo_tokens # Store inflation count
         self.cond_channels = cond_channels
         self.enable_cond_image = enable_cond_image
         
-        # Calculate number of components for RNG splitting
         num_components = depth + 7
         if enable_cond_image:
-            num_components += 2  # cond_embedder + cond_pos_embed
+            num_components += 2
         
         rng_keys = jax.random.split(rngs(), num_components)
         
@@ -933,82 +897,67 @@ class JADE(nnx.Module):
         rngs_x_embedder = nnx.Rngs(rng_keys[idx]); idx += 1
         rngs_cosmo_embedder = nnx.Rngs(rng_keys[idx]); idx += 1
         
-        # Conditionally allocate RNG for conditioning components
         if enable_cond_image:
             rngs_cond_embedder = nnx.Rngs(rng_keys[idx]); idx += 1
             rngs_cond_pos = nnx.Rngs(rng_keys[idx]); idx += 1
         
         rngs_rope = nnx.Rngs(rng_keys[idx]); idx += 1
-        rngs_rope_nocond = nnx.Rngs(rng_keys[idx]); idx += 1  # Separate RoPE for no conditioning
+        rngs_rope_nocond = nnx.Rngs(rng_keys[idx]); idx += 1
         rngs_final = nnx.Rngs(rng_keys[idx]); idx += 1
         rngs_cosmo_head = nnx.Rngs(rng_keys[idx]); idx += 1
         rngs_blocks = [nnx.Rngs(rng_keys[idx + i]) for i in range(depth)]
         
-        # Time embedder (diffusion timestep)
         self.t_embedder = TimestepEmbedder(hidden_size, rngs=rngs_t_embedder)
         
-        # Cosmology embedder (cosmo_dim parameters → cosmo_dim tokens)
+        # Updated to use inflation
         self.cosmo_embedder = CosmologyEmbedder(
-            cosmo_dim, hidden_size, rngs=rngs_cosmo_embedder
+            cosmo_dim, hidden_size, num_tokens=num_cosmo_tokens, rngs=rngs_cosmo_embedder
         )
 
-        # Field patch embedding (FINE: patch_size=8)
         self.x_embedder = BottleneckPatchEmbed(
             input_size, patch_size, in_channels, bottleneck_dim, hidden_size,
             bias=True, rngs=rngs_x_embedder
         )
         
-        # Conditioning image components with LARGER patches ← MODIFIED
         if self.enable_cond_image:
             self.cond_embedder = BottleneckPatchEmbed(
-                input_size, 
-                cond_patch_size,  # ← Use 16 instead of 8!
-                cond_channels, 
-                bottleneck_dim, 
-                hidden_size,
-                bias=True, 
-                rngs=rngs_cond_embedder
+                input_size, cond_patch_size, cond_channels, bottleneck_dim, hidden_size,
+                bias=True, rngs=rngs_cond_embedder
             )
             
-            # Positional embeddings for conditioning (fewer patches!)
-            num_cond_patches = (input_size // cond_patch_size) ** 2  # 64 instead of 256
+            num_cond_patches = (input_size // cond_patch_size) ** 2
             cond_pos_embed = jax.random.normal(
                 rngs_cond_pos(), (num_cond_patches, hidden_size)
             ) * 0.02
             self.cond_pos_embed = nnx.Param(cond_pos_embed)
         
-        # Fixed sin-cos positional embeddings for field patches
-        num_field_patches = (input_size // patch_size) ** 2  # 256
+        num_field_patches = (input_size // patch_size) ** 2
         pos_embed = get_2d_sincos_pos_embed(
             hidden_size, int(num_field_patches ** 0.5),
             cls_token=False, extra_tokens=0
         )
         self.pos_embed = nnx.Param(jnp.array(pos_embed, dtype=jnp.float32))
         
-        # RoPE needs to account for different sequence lengths
         half_head_dim = hidden_size // num_heads // 2
-        hw_seq_len_field = input_size // patch_size  # 16
-        hw_seq_len_cond = input_size // cond_patch_size  # 8
+        hw_seq_len_field = input_size // patch_size
         
-        # RoPE without conditioning (just field patches)
+        # RoPE without conditioning (Cosmo tokens + field patches)
         self.feat_rope_nocond = VisionRotaryEmbeddingFast(
             dim=half_head_dim,
-            pt_seq_len=hw_seq_len_field,  # 16
-            num_cls_token=1,
+            pt_seq_len=hw_seq_len_field,
+            num_cls_token=num_cosmo_tokens, # ← Updated
             rngs=rngs_rope_nocond
         )
 
-        # RoPE with conditioning (cond + field patches)
         if self.enable_cond_image:
-            # Account for: 1 cosmo + 64 cond patches + 256 field patches
-            num_prefix_tokens = 1 + num_cond_patches  # 1 + 64 = 65
+            num_prefix_tokens = num_cosmo_tokens + num_cond_patches # ← Updated
             self.feat_rope_cond = VisionRotaryEmbeddingFast(
                 dim=half_head_dim,
-                pt_seq_len=hw_seq_len_field,  # 16 (for field patches)
-                num_cls_token=num_prefix_tokens,  # ✅ All non-field tokens
+                pt_seq_len=hw_seq_len_field,
+                num_cls_token=num_prefix_tokens,
                 rngs=rngs_rope
             )
-        # Transformer blocks
+
         self.blocks = nnx.List([
             JiTBlock(
                 hidden_size, num_heads, mlp_ratio=mlp_ratio,
@@ -1019,22 +968,15 @@ class JADE(nnx.Module):
             for i in range(depth)
         ])
         
-        # Output heads
         self.field_head = FinalLayer(hidden_size, patch_size, self.out_channels, rngs=rngs_final)
-        self.cosmo_head = CosmologyPredictor(hidden_size, cosmo_dim, rngs=rngs_cosmo_head)
+        self.cosmo_head = CosmologyPredictor(
+            hidden_size, cosmo_dim, num_tokens=num_cosmo_tokens, rngs=rngs_cosmo_head
+        )
         
         self.initialize_weights()
 
     def initialize_weights(self):
-        """
-        Initialize weights for JADE model following PyTorch JiT initialization pattern.
-        """
-        
-        # ===================================================================
-        # STEP 1: Basic initialization - Xavier uniform for ALL Linear layers
-        # ===================================================================
         def init_linear_xavier(module):
-            """Apply Xavier uniform initialization to a Linear module."""
             if isinstance(module, nnx.Linear):
                 w = module.kernel.value
                 w_flat = w.reshape(w.shape[0], -1)
@@ -1045,7 +987,6 @@ class JADE(nnx.Module):
                 if hasattr(module, 'bias') and module.bias is not None:
                     module.bias.value = jnp.zeros_like(module.bias.value)
         
-        # Apply Xavier uniform to all Linear layers
         init_linear_xavier(self.t_embedder.linear1)
         init_linear_xavier(self.t_embedder.linear2)
         init_linear_xavier(self.cosmo_embedder.proj)
@@ -1061,208 +1002,93 @@ class JADE(nnx.Module):
         init_linear_xavier(self.field_head.linear)
         init_linear_xavier(self.field_head.ada_linear)
         
-        # ===================================================================
-        # STEP 2: Initialize patch_embed like nn.Linear (Xavier uniform)
-        # ===================================================================
-        # Field embedder
         w1 = self.x_embedder.proj1.kernel.value
-        w1_flat = w1.reshape(w1.shape[0], -1)
-        w1_init = jax.nn.initializers.xavier_uniform()(
-            jax.random.PRNGKey(1), w1_flat.shape
-        )
+        w1_init = jax.nn.initializers.xavier_uniform()(jax.random.PRNGKey(1), w1.reshape(w1.shape[0], -1).shape)
         self.x_embedder.proj1.kernel.value = w1_init.reshape(w1.shape)
         
         w2 = self.x_embedder.proj2.kernel.value
-        w2_flat = w2.reshape(w2.shape[0], -1)
-        w2_init = jax.nn.initializers.xavier_uniform()(
-            jax.random.PRNGKey(2), w2_flat.shape
-        )
+        w2_init = jax.nn.initializers.xavier_uniform()(jax.random.PRNGKey(2), w2.reshape(w2.shape[0], -1).shape)
         self.x_embedder.proj2.kernel.value = w2_init.reshape(w2.shape)
         self.x_embedder.proj2.bias.value = jnp.zeros_like(self.x_embedder.proj2.bias.value)
         
-        # Conditioning image embedder (only if enabled)
         if self.enable_cond_image:
-            w1_cond = self.cond_embedder.proj1.kernel.value
-            w1_cond_flat = w1_cond.reshape(w1_cond.shape[0], -1)
-            w1_cond_init = jax.nn.initializers.xavier_uniform()(
-                jax.random.PRNGKey(10), w1_cond_flat.shape
-            )
-            self.cond_embedder.proj1.kernel.value = w1_cond_init.reshape(w1_cond.shape)
-            
-            w2_cond = self.cond_embedder.proj2.kernel.value
-            w2_cond_flat = w2_cond.reshape(w2_cond.shape[0], -1)
-            w2_cond_init = jax.nn.initializers.xavier_uniform()(
-                jax.random.PRNGKey(11), w2_cond_flat.shape
-            )
-            self.cond_embedder.proj2.kernel.value = w2_cond_init.reshape(w2_cond.shape)
-            self.cond_embedder.proj2.bias.value = jnp.zeros_like(
-                self.cond_embedder.proj2.bias.value
-            )
+            w1_c = self.cond_embedder.proj1.kernel.value
+            w1_c_init = jax.nn.initializers.xavier_uniform()(jax.random.PRNGKey(10), w1_c.reshape(w1_c.shape[0], -1).shape)
+            self.cond_embedder.proj1.kernel.value = w1_c_init.reshape(w1_c.shape)
+            w2_c = self.cond_embedder.proj2.kernel.value
+            w2_c_init = jax.nn.initializers.xavier_uniform()(jax.random.PRNGKey(11), w2_c.reshape(w2_c.shape[0], -1).shape)
+            self.cond_embedder.proj2.kernel.value = w2_c_init.reshape(w2_c.shape)
+            self.cond_embedder.proj2.bias.value = jnp.zeros_like(self.cond_embedder.proj2.bias.value)
         
-        # ===================================================================
-        # STEP 3: Initialize timestep embedder (normal, std=0.02)
-        # ===================================================================
-        key = jax.random.PRNGKey(3)
-        self.t_embedder.linear1.kernel.value = jax.random.normal(
-            key, self.t_embedder.linear1.kernel.value.shape
-        ) * 0.02
+        self.t_embedder.linear1.kernel.value = jax.random.normal(jax.random.PRNGKey(3), self.t_embedder.linear1.kernel.value.shape) * 0.02
+        self.t_embedder.linear2.kernel.value = jax.random.normal(jax.random.PRNGKey(4), self.t_embedder.linear2.kernel.value.shape) * 0.02
         
-        key = jax.random.PRNGKey(4)
-        self.t_embedder.linear2.kernel.value = jax.random.normal(
-            key, self.t_embedder.linear2.kernel.value.shape
-        ) * 0.02
+        # Cosmo Init
+        self.cosmo_embedder.proj.kernel.value = jax.random.normal(jax.random.PRNGKey(5), self.cosmo_embedder.proj.kernel.value.shape) * 0.02
+        self.cosmo_embedder.proj.bias.value = jnp.zeros_like(self.cosmo_embedder.proj.bias.value)
+        # Symmetry break for inflation tokens
+        self.cosmo_embedder.token_pos_embed.value = jax.random.normal(jax.random.PRNGKey(6), self.cosmo_embedder.token_pos_embed.value.shape) * 0.02
         
-        # ===================================================================
-        # STEP 4: Initialize cosmology embedder (normal, std=0.02)
-        # ===================================================================
-        key = jax.random.PRNGKey(5)
-        self.cosmo_embedder.proj.kernel.value = jax.random.normal(
-            key, self.cosmo_embedder.proj.kernel.value.shape
-        ) * 0.02
-        self.cosmo_embedder.proj.bias.value = jnp.zeros_like(
-            self.cosmo_embedder.proj.bias.value
-        )
-        
-        # ===================================================================
-        # STEP 5: Zero-out adaLN modulation layers in transformer blocks
-        # ===================================================================
         for block in self.blocks:
             block.ada_linear.kernel.value = jnp.zeros_like(block.ada_linear.kernel.value)
             block.ada_linear.bias.value = jnp.zeros_like(block.ada_linear.bias.value)
         
-        # ===================================================================
-        # STEP 6: Zero-out field output layers
-        # ===================================================================
-        self.field_head.ada_linear.kernel.value = jnp.zeros_like(
-            self.field_head.ada_linear.kernel.value
-        )
-        self.field_head.ada_linear.bias.value = jnp.zeros_like(
-            self.field_head.ada_linear.bias.value
-        )
-        self.field_head.linear.kernel.value = jnp.zeros_like(
-            self.field_head.linear.kernel.value
-        )
-        self.field_head.linear.bias.value = jnp.zeros_like(
-            self.field_head.linear.bias.value
-        )
+        self.field_head.ada_linear.kernel.value = jnp.zeros_like(self.field_head.ada_linear.kernel.value)
+        self.field_head.ada_linear.bias.value = jnp.zeros_like(self.field_head.ada_linear.bias.value)
+        self.field_head.linear.kernel.value = jnp.zeros_like(self.field_head.linear.kernel.value)
+        self.field_head.linear.bias.value = jnp.zeros_like(self.field_head.linear.bias.value)
         
-        # ===================================================================
-        # STEP 7: Zero-out cosmology output head
-        # ===================================================================
-        self.cosmo_head.proj.kernel.value = jnp.zeros_like(
-            self.cosmo_head.proj.kernel.value
-        )
-        self.cosmo_head.proj.bias.value = jnp.zeros_like(
-            self.cosmo_head.proj.bias.value
-        )
+        self.cosmo_head.proj.kernel.value = jnp.zeros_like(self.cosmo_head.proj.kernel.value)
+        self.cosmo_head.proj.bias.value = jnp.zeros_like(self.cosmo_head.proj.bias.value)
 
     def unpatchify(self, x, p):
-        """
-        Convert patches back to image.
-        
-        Args:
-            x: (N, patch_size**2 * C)
-            p: patch_size
-        
-        Returns:
-            image (H, W, C) in JAX format
-        """
         c = self.out_channels
         N = x.shape[0]
         h = w = int(N ** 0.5)
         assert h * w == N
-        
         x = x.reshape(h, w, p, p, c)
         x = jnp.einsum('hwpqc->hpwqc', x)
-        imgs = x.reshape(h * p, w * p, c)
-        return imgs
+        return x.reshape(h * p, w * p, c)
     
     def __call__(self, field, cosmo, t, cond=None, train=False):
-        """
-        Joint forward pass: denoise both field and cosmology with optional image conditioning.
-        
-        Args:
-            field: noisy dark matter field (H, W, C)
-            cosmo: noisy cosmological parameters (cosmo_dim,)
-            t: diffusion timestep (scalar or array)
-            cond: conditioning image (H, W, C_cond), optional (can be None)
-            train: training mode flag
-        
-        Returns:
-            field_pred: denoised field prediction (H, W, C)
-            cosmo_pred: denoised cosmology prediction (cosmo_dim,)
-        """
-        # Ensure t is array
         if jnp.ndim(t) == 0:
             t = jnp.array([t])
         
-        # ===================================================================
-        # STEP 1: Get time embedding for AdaLN conditioning
-        # ===================================================================
-        t_emb = self.t_embedder(t)[0]  # (hidden_size,)
-        c = t_emb  # Just time conditioning
+        t_emb = self.t_embedder(t)[0]
+        c = t_emb
         
-        # ===================================================================
-        # STEP 2: Embed cosmology parameters as tokens
-        # ===================================================================
-        cosmo_tokens = self.cosmo_embedder(cosmo)  # (cosmo_dim, hidden_size)
+        cosmo_tokens = self.cosmo_embedder(cosmo)  # (num_cosmo_tokens, hidden_size)
         
-        # ===================================================================
-        # STEP 3: Build the token sequence (varies based on conditioning)
-        # ===================================================================
         token_list = [cosmo_tokens]
-        
         using_cond = self.enable_cond_image and cond is not None
         
         if using_cond:
-            # Conditioning: patch_size=16 → 64 patches
-            cond_tokens = self.cond_embedder(cond)  # (64, hidden_size)
+            cond_tokens = self.cond_embedder(cond)
             cond_tokens = cond_tokens + self.cond_pos_embed.value
             token_list.append(cond_tokens)
-            num_cond_patches = 64  # Updated!
+            num_cond_patches = (self.input_size // self.cond_embedder.patch_size[0]) ** 2
         
-        # Field: patch_size=8 → 256 patches  
-        field_tokens = self.x_embedder(field)  # (256, hidden_size)
+        field_tokens = self.x_embedder(field)
         field_tokens = field_tokens + self.pos_embed.value
         token_list.append(field_tokens)
         
         x = jnp.concatenate(token_list, axis=0)
-        
-        # ===================================================================
-        # STEP 4: Select appropriate RoPE based on whether conditioning is used
-        # ===================================================================
-        # Use feat_rope_cond if conditioning image is provided, else feat_rope_nocond
         feat_rope = self.feat_rope_cond if using_cond else self.feat_rope_nocond
         
-        # ===================================================================
-        # STEP 5: Forward through transformer blocks
-        # ===================================================================
         for block in self.blocks:
             x = block(x, c, feat_rope=feat_rope, train=train)
         
-        # ===================================================================
-        # STEP 6: Split sequence back into components
-        # ===================================================================
+        # Split logic
         idx = 0
+        cosmo_tokens_out = x[idx:idx + self.num_cosmo_tokens] # ← Updated
+        idx += self.num_cosmo_tokens # ← Updated
         
-        # Extract cosmology token (now just 1 token)
-        cosmo_token_out = x[idx:idx + 1]  # Changed from self.cosmo_dim to 1
-        idx += 1  # Changed from self.cosmo_dim to 1
-        
-        # Skip conditioning image tokens if present
         if using_cond:
             idx += num_cond_patches
         
-        # Extract field tokens (rest of the sequence)
         field_tokens_out = x[idx:]
         
-        # ===================================================================
-        # STEP 7: Predict outputs
-        # ===================================================================
-        # Predict denoised cosmology
-        cosmo_pred = self.cosmo_head(cosmo_token_out)  # Still passes (1, hidden_size)
-        
-        # Predict denoised field
+        cosmo_pred = self.cosmo_head(cosmo_tokens_out)
         field_tokens_pred = self.field_head(field_tokens_out, c)
         field_pred = self.unpatchify(field_tokens_pred, self.patch_size)
         
@@ -1279,7 +1105,7 @@ class JADE(nnx.Module):
 #         rngs=rngs, **kwargs
 #     )
 
-def JADE_B_16_mixed(rngs, cosmo_dim=6, enable_cond_image=True, cond_channels=5, **kwargs):
+def JADE_B_16_mixed(rngs, cosmo_dim=6, enable_cond_image=True, cond_channels=5, num_cosmo_tokens=16, **kwargs):
     """Base model with mixed patch sizes: 8 for target, 16 for conditioning."""
     return JADE(
         depth=12, 
@@ -1291,6 +1117,7 @@ def JADE_B_16_mixed(rngs, cosmo_dim=6, enable_cond_image=True, cond_channels=5, 
         cond_channels=cond_channels,
         patch_size=8,           # Fine detail for target
         cond_patch_size=16,     # Coarse for noisy conditioning
+        num_cosmo_tokens=num_cosmo_tokens, # Added inflation factor
         rngs=rngs, 
         **kwargs
     )

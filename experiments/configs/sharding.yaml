@@ -78,6 +78,7 @@ loss:
   type: "v-loss" # "x-loss"
   mixture: false
   lambda_cosmo: 10. # 1.0
+  SCALE_COSMO: 16
 
 start_from_checkpoint: false
 lap: 0

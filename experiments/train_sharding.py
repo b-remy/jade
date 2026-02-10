@@ -453,7 +453,7 @@ def train(cfg):
 
             key, subkey = jax.random.split(key, 2)
             x = augment(batch["map"], jax.random.split(subkey, len(batch["map"])))
-            cosmo = batch["theta"]
+            cosmo = batch["theta"] * cfg['loss']['SCALE_COSMO']
             
             key, subkey = jax.random.split(key, 2)
             # Noisy field condition
@@ -509,7 +509,7 @@ def train(cfg):
         for batch in val_loader:
             batch = normalize_batch(batch)
             x_val = batch["map"]
-            cosmo_val = batch["theta"]
+            cosmo_val = batch["theta"] * cfg['loss']['SCALE_COSMO']
             
             key, val_key = jax.random.split(key, 2)
             
@@ -533,7 +533,7 @@ def train(cfg):
         
         run.log({
             "val/loss_total": val_loss,
-            "val/loss_field": val_loss_x,
+            "val/loss_field": val_loss_x/cfg['loss']['SCALE_COSMO'],
             "val/loss_cosmo": val_loss_cosmo,
             "epoch": epoch + 1,
         })
@@ -565,7 +565,7 @@ def train(cfg):
 
             x_samples, cosmo_samples = jax.vmap(sampler)(x_0, cosmo_0, cond_plot, keys)
 
-            fig = plot_samples(x_samples, cosmo_samples, n_samples=6)
+            fig = plot_samples(x_samples, cosmo_samples/cfg['loss']['SCALE_COSMO'], n_samples=6)
             wandb.log({"samples": wandb.Image(fig)})
             plt.close(fig)
 
