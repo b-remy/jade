@@ -50,7 +50,7 @@ class PosteriorDenoiser(Denoiser):
 
         # linear solver
         self.solve = jax.scipy.sparse.linalg.cg
-        #self.solve = jax.scipy.sparse.linalg.gmres
+        # self.solve = jax.scipy.sparse.linalg.gmres
         #self.solve = jax.scipy.sparse.linalg.bicgstab
         self.tol = 1e-3
         self.maxiter = 10
@@ -98,7 +98,7 @@ class FlowLoss(nnx.Module):
         self.t_eps = cfg["diffusion"]["t_eps"]
         self.mu = cfg['diffusion']['mu']
         self.sigma= cfg['diffusion']['sigma']
-
+        self.mixture = cfg['loss'].get('mixture', False)
     def __call__(self, model, x, cosmo, key, lambda_cosmo, train: bool = False, cond=None):
 
         mu = self.mu
@@ -126,8 +126,11 @@ class FlowLoss(nnx.Module):
         loss_x = jnp.mean((x - x_pred)**2, axis=(-1,-2,-3))
         loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
 
-        total_loss = loss_x + lambda_cosmo * loss_cosmo
-        
-        total_loss = total_loss.mean()
+        if self.mixture:
+            total_loss = (loss_x + lambda_cosmo * loss_cosmo).mean()
+        else:
+            total_loss = jnp.sum((x - x_pred)**2, axis=(-1,-2,-3)) + jnp.sum((cosmo - cosmo_pred)**2, axis=-1)
+            total_loss = total_loss / (x.shape[-1]*x.shape[-2]*x.shape[-3]  + cosmo.shape[-1])
+            total_loss = total_loss.mean()
 
         return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))

@@ -33,7 +33,7 @@ optimizer:
   
   use_schedule: true
   schedule:
-    init_value: 7e-5
+    init_value: 1e-4
     end_value: 1e-5
 
 # EMA configuration
@@ -76,7 +76,8 @@ logging:
 # Loss configuration
 loss:
   type: "v-loss" # "x-loss"
-  lambda_cosmo: 0.1 # 1.0
+  mixture: false
+  lambda_cosmo: 10. # 1.0
 
 start_from_checkpoint: false
 lap: 0
