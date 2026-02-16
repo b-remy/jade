@@ -270,6 +270,7 @@ def train(cfg):
         input_size=cfg['model']['input_size'],
         enable_cond_image=cfg["model"]["enable_cond_image"],
         cond_channels=cfg["model"]["cond_channels"],
+        num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
         # patch_size=cfg["model"]["patch_size"]
     )
 
@@ -595,8 +596,9 @@ def train(cfg):
             )
             
             # Save best checkpoint
-            if cfg['checkpoint']['keep_best'] and val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if cfg['checkpoint']['keep_best'] and val_loss_cosmo < best_val_loss:
+                # best_val_loss = val_loss
+                best_val_loss = val_loss_cosmo  # Track best based on cosmology loss
                 if cfg['ema']['use_ema'] and ema_params is not None:
                     dump_model(
                         cfg,
