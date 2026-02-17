@@ -6,11 +6,12 @@ model:
   enable_cond_image: true
   cond_channels: 5
   patch_size: 8
-  num_cosmo_tokens: 32
+  cond_patch_size: 32
+  num_cosmo_tokens: 1
 # Training configuration
 training:
   num_epochs: 320
-  batch_size: 256
+  batch_size: 128
   seed: 42
   use_mixed_precision: true
   precision: "bfloat16"
@@ -34,8 +35,8 @@ optimizer:
   
   use_schedule: true
   schedule:
-    init_value: 1e-3
-    end_value: 1e-5
+    init_value: 5e-3
+    end_value: 1e-4
 
 # EMA configuration
 ema:

@@ -1105,7 +1105,7 @@ class JADE(nnx.Module):
 #         rngs=rngs, **kwargs
 #     )
 
-def JADE_B_16_mixed(rngs, cosmo_dim=6, enable_cond_image=True, cond_channels=5, num_cosmo_tokens=16, **kwargs):
+def JADE_B_16_mixed(rngs, cosmo_dim=6, enable_cond_image=True, cond_channels=5, num_cosmo_tokens=16, cond_patch_size=16, **kwargs):
     """Base model with mixed patch sizes: 8 for target, 16 for conditioning."""
     return JADE(
         depth=12, 
@@ -1116,7 +1116,7 @@ def JADE_B_16_mixed(rngs, cosmo_dim=6, enable_cond_image=True, cond_channels=5, 
         enable_cond_image=enable_cond_image,
         cond_channels=cond_channels,
         patch_size=8,           # Fine detail for target
-        cond_patch_size=16,     # Coarse for noisy conditioning
+        cond_patch_size=cond_patch_size,     # Coarse for noisy conditioning
         num_cosmo_tokens=num_cosmo_tokens, # Added inflation factor
         rngs=rngs, 
         **kwargs

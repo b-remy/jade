@@ -271,6 +271,7 @@ def train(cfg):
         enable_cond_image=cfg["model"]["enable_cond_image"],
         cond_channels=cfg["model"]["cond_channels"],
         num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
+        cond_patch_size=cfg['model']['cond_patch_size'],
         # patch_size=cfg["model"]["patch_size"]
     )
 
