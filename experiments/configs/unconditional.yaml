@@ -6,6 +6,8 @@ model:
   enable_cond_image: false
   cond_channels: 5
   patch_size: 8
+  num_cosmo_tokens: 16
+
 # Training configuration
 training:
   num_epochs: 320
@@ -33,8 +35,8 @@ optimizer:
   
   use_schedule: true
   schedule:
-    init_value: 1e-4
-    end_value: 1e-5
+    init_value: 1e-3
+    end_value: 1e-4
 
 # EMA configuration
 ema:
@@ -78,7 +80,7 @@ loss:
   type: "v-loss" # "x-loss"
   mixture: false
   lambda_cosmo: 10. # 1.0
-  SCALE_COSMO: 16
+  SCALE_COSMO: 1.
 
 start_from_checkpoint: false
 lap: 0

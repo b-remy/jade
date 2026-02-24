@@ -6,12 +6,12 @@ model:
   enable_cond_image: true
   cond_channels: 5
   patch_size: 8
-  cond_patch_size: 32
-  num_cosmo_tokens: 1
+  cond_patch_size: 16
+  num_cosmo_tokens: 16
 # Training configuration
 training:
   num_epochs: 320
-  batch_size: 128
+  batch_size: 256
   seed: 42
   use_mixed_precision: true
   precision: "bfloat16"
