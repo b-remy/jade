@@ -94,7 +94,7 @@ def sample_generator(
 
         for i in range(batch_size):
             yield {
-                "z": z[i]
+                "z": z[i],
                 "map": maps[i],
                 "theta": theta[i],
             }
@@ -128,7 +128,8 @@ def generate_dataset(
     model = setup_model(N=N, map_size=map_size, with_noise=with_noise)
 
     print("Determining data structure...")
-    test_key, _ = jax.random.split(job_key)
+    #test_key, _ = jax.random.split(job_key)
+    test_key = jax.random.key(0)
     test_z, test_maps, test_theta = generate_batch(
         model, test_key, 1, with_noise
     )
