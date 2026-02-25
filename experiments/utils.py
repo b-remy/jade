@@ -83,6 +83,7 @@ def get_samples(
                 [model_trace[name]["value"] for name in params_name], axis=-1
             ),
             "y": model_trace["y"]["value"],
+            "z": model_trace["z"]["value"]
         }
 
         if score_type == "density":
