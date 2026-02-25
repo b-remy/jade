@@ -60,7 +60,7 @@ def generate_batch(model, key, batch_size, with_noise=False):
 
     _, samples = jax.jit(sample_fn)(key=key)
 
-    z = samples["z"]
+    z = samples["z"].transpose(0, 2, 3, 1)  # [batch_size, nbins, N, N]
     maps = samples["y"]
     theta = samples["theta"]
 
@@ -71,10 +71,21 @@ def generate_batch(model, key, batch_size, with_noise=False):
 # Generator
 # ------------------------------------------------------------------
 
-def sample_generator(model, batch_size, total_samples, key, with_noise=False):
-    """
-    Memory-efficient generator using a JAX PRNGKey.
-    """
+def sample_generator(
+    N,
+    map_size,
+    with_noise,
+    batch_size,
+    total_samples,
+    base_seed,
+    job_id,
+):
+
+    base_key = jax.random.key(base_seed)
+    key = jax.random.fold_in(base_key, job_id)
+
+    model = setup_model(N=N, map_size=map_size, with_noise=with_noise)
+
     num_batches = total_samples // batch_size
 
     for _ in tqdm(range(num_batches)):
@@ -83,11 +94,10 @@ def sample_generator(model, batch_size, total_samples, key, with_noise=False):
 
         for i in range(batch_size):
             yield {
-                "z": z[i],
+                "z": z[i]
                 "map": maps[i],
                 "theta": theta[i],
             }
-
 
 # ------------------------------------------------------------------
 # Dataset creation
@@ -106,10 +116,6 @@ def generate_dataset(
     """
     Generate dataset for a given job_id using fold_in for independent randomness.
     """
-
-    # ✅ Proper JAX-distributed-safe key derivation
-    base_key = jax.random.key(base_seed)
-    job_key = jax.random.fold_in(base_key, job_id)
 
     print(f"\nJob ID: {job_id}")
     print(f"Base seed: {base_seed}")
@@ -137,17 +143,33 @@ def generate_dataset(
         "theta": Sequence(Value(dtype="float32"), length=n_params),
     })
 
-    gen = lambda: sample_generator(
-        model,
-        batch_size,
-        total_samples,
-        job_key,
-        with_noise,
-    )
+    # gen = lambda: sample_generator(
+    #     model,
+    #     batch_size,
+    #     total_samples,
+    #     base_seed,
+    #     job_id,
+    #     with_noise,
+    # )
 
-    print("Creating dataset from generator...")
+    # print("Creating dataset from generator...")
+    # dataset = Dataset.from_generator(
+    #     gen,
+    #     features=features,
+    #     cache_dir=str(output_dir / "cache"),
+    # )
+
     dataset = Dataset.from_generator(
-        gen,
+        sample_generator,
+        gen_kwargs={
+            "N": N,
+            "map_size": map_size,
+            "with_noise": with_noise,
+            "batch_size": batch_size,
+            "total_samples": total_samples,
+            "base_seed": base_seed,
+            "job_id": job_id,
+        },
         features=features,
         cache_dir=str(output_dir / "cache"),
     )
