@@ -61,11 +61,11 @@ def generate_batch(model, key, batch_size, with_noise=False):
     _, samples = jax.jit(sample_fn)(key=key)
 
     z = samples["z"].transpose(0, 2, 3, 1)  # [batch_size, nbins, N, N]
+    g = samples["g"].transpose(0, 2, 3, 1)  # [batch_size, nbins, N, N]
     maps = samples["y"]
     theta = samples["theta"]
 
-    return z, maps, theta
-
+    return z, g, maps, theta
 
 # ------------------------------------------------------------------
 # Generator
@@ -90,11 +90,12 @@ def sample_generator(
 
     for _ in tqdm(range(num_batches)):
         key, subkey = jax.random.split(key)
-        z, maps, theta = generate_batch(model, subkey, batch_size, with_noise)
+        z, g, maps, theta = generate_batch(model, subkey, batch_size, with_noise)
 
         for i in range(batch_size):
             yield {
                 "z": z[i],
+                "g": g[i],
                 "map": maps[i],
                 "theta": theta[i],
             }
@@ -130,16 +131,18 @@ def generate_dataset(
     print("Determining data structure...")
     #test_key, _ = jax.random.split(job_key)
     test_key = jax.random.key(0)
-    test_z, test_maps, test_theta = generate_batch(
+    test_z, test_g, test_maps, test_theta = generate_batch(
         model, test_key, 1, with_noise
     )
 
     z_shape = test_z.shape[1:]
+    g_shape = test_g.shape[1:]
     map_shape = test_maps.shape[1:]
     n_params = test_theta.shape[1]
 
     features = Features({
         "z": Array3D(dtype="float32", shape=z_shape),
+        "g": Array3D(dtype="float32", shape=g_shape),
         "map": Array3D(dtype="float32", shape=map_shape),
         "theta": Sequence(Value(dtype="float32"), length=n_params),
     })

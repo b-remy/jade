@@ -252,7 +252,7 @@ def train(cfg):
     
     # Load dataset
     dataset = concatenate_datasets([
-        load_from_disk(os.path.join(cfg['data']['dataset_paths'], f"job_{i}")) for i in range(4)
+        load_from_disk(os.path.join(cfg['data']['dataset_path'], f"job_{i}")) for i in range(4)
     ])
     
     dataset = dataset.with_format("numpy")
