@@ -50,7 +50,7 @@ cfg, states = load_model(
     # "/u/bremy/repos/jade/experiments/wandb/run-20260217_173825-gbm2flrd/files/checkpoints",
     #  "/u/bremy/repos/jade/experiments/wandb/run-20260218_132547-3685luj0/files/checkpoints",
     
-    "/u/bremy/repos/jade/experiments/wandb/run-20260219_232046-jhj5rm2p/files/checkpoints",
+    "/u/bremy/repos/jade/experiments/run-20260219_232046-jhj5rm2p/files/checkpoints",
     
     # "/u/bremy/repos/jade/experiments/wandb/run-20260221_001138-1g4mzv90/files/checkpoints",
     # "/u/bremy/repos/jade/experiments/wandb/run-20260221_001420-y91pn6l8/files/checkpoints",
@@ -386,24 +386,52 @@ def compute_ps(m_data1, m_data_2):
 
 ell, ps_auto, ps_cross = compute_ps(m_data, m_data)
 
+# Theoretical Cl from jax_cosmo for the fiducial cosmology, evaluated at the
+# lenstools bin centers. Used as the (noise-free) reference for the relative plot.
+from sbi_lens.simulator.redshift import subdivide as _subdivide
+_nz = jc.redshift.smail_nz(a, b, z0, gals_per_arcmin2=gals_per_arcmin2)
+_nz_bins = _subdivide(_nz, nbins=nbins, zphot_sigma=0.05)
+_tracer = jc.probes.WeakLensing(_nz_bins, sigma_e=sigma_e)
+_cosmo_th = jc.Planck15(
+    Omega_c=cosmo.Omega_c, Omega_b=cosmo.Omega_b, h=cosmo.h,
+    n_s=cosmo.n_s, sigma8=cosmo.sigma8, w0=cosmo.w0,
+)
+_cl_th = np.array(jc.angular_cl.angular_cl(_cosmo_th, jnp.asarray(ell), [_tracer]))
+# upper-triangular pair ordering: (0,0),(0,1),...,(0,4),(1,1),...,(4,4)
+_pair_idx = {(min(i, j), max(i, j)): k
+             for k, (i, j) in enumerate([(a_, b_) for a_ in range(5) for b_ in range(a_, 5)])}
+ps_auto_th = np.stack([_cl_th[_pair_idx[(i, i)]] for i in range(5)])
+ps_cross_th = np.zeros((5, 5, len(ell)))
+for i in range(5):
+    for j in range(5):
+        if i != j:
+            ps_cross_th[i, j] = _cl_th[_pair_idx[(min(i, j), max(i, j))]]
+
 pix_size = 5 * 60 / 128 # arcmin / pixel
 pix_size_rad =  np.pi * pix_size / (180 * 60)
 print(pix_size_rad)
 ell_max = 2*np.pi / (2*pix_size_rad)
 print(ell_max)
 
-index = np.argmin(((cosmo_samples-data["theta"])**2).sum(1))
-
 ps_auto_samples = []
 ps_cross_samples = []
-ell_s, ps_auto_s, ps_cross_s = compute_ps(x_samples_[index], x_samples_[index])
-ps_auto_samples.append(ps_auto_s)
-ps_cross_samples.append(ps_cross_s)
+n_ps_samples = min(64, len(x_samples_))
+for s in tqdm(range(n_ps_samples), desc="computing ps"):
+    ell_s, ps_auto_s, ps_cross_s = compute_ps(x_samples_[s], x_samples_[s])
+    ps_auto_samples.append(ps_auto_s)
+    ps_cross_samples.append(ps_cross_s)
 ps_auto_samples = np.array(ps_auto_samples)
 ps_cross_samples = np.array(ps_cross_samples)
 
+ps_auto_mean = ps_auto_samples.mean(0)
+ps_auto_std = ps_auto_samples.std(0)
+ps_cross_mean = ps_cross_samples.mean(0)
+ps_cross_std = ps_cross_samples.std(0)
+
+from matplotlib.ticker import LogLocator, MaxNLocator, NullFormatter
+
 fontsize_text = 20  # For labels and legend
-fontsize_ticks = 16  # For tick labels
+fontsize_ticks = 12  # For tick labels
 
 fig, ax = plt.subplots(5,5,figsize=(10,10))
 for i in range(5):
@@ -413,31 +441,157 @@ for i in range(5):
         else:
             if i==j:
                 ax[i,j].loglog(ell, ps_auto[i], label='Fiducial', color="k", alpha=1.)
-                for ps in ps_auto_samples:
-                    ax[i,j].loglog(ell, ps[i], color='tab:blue', alpha=1, label="Posterior sample")
-                
-                
+                ax[i,j].plot(ell, ps_auto_mean[i], color='tab:blue', alpha=1, label="Posterior mean")
+                ax[i,j].fill_between(ell, ps_auto_mean[i] - ps_auto_std[i],
+                                     ps_auto_mean[i] + ps_auto_std[i],
+                                     color='tab:blue', alpha=0.3)
+                ax[i,j].set_xscale('log')
+                ax[i,j].set_yscale('log')
             else:
                 ax[i,j].loglog(ell, ps_cross[:,i, j], color='k')
-                for ps in ps_cross_samples:
-                    ax[i,j].loglog(ell, ps[:,i,j], color='tab:blue', alpha=1.)
+                ax[i,j].plot(ell, ps_cross_mean[:, i, j], color='tab:blue', alpha=1.)
+                ax[i,j].fill_between(ell, ps_cross_mean[:, i, j] - ps_cross_std[:, i, j],
+                                     ps_cross_mean[:, i, j] + ps_cross_std[:, i, j],
+                                     color='tab:blue', alpha=0.3)
+                ax[i,j].set_xscale('log')
+                ax[i,j].set_yscale('log')
+            ax[i,j].set_xlim(ell.min(), ell.max())
+            ax[i,j].xaxis.set_major_locator(LogLocator(base=10.0, numticks=3))
+            ax[i,j].yaxis.set_major_locator(LogLocator(base=10.0, numticks=4))
+            ax[i,j].xaxis.set_minor_formatter(NullFormatter())
+            ax[i,j].yaxis.set_minor_formatter(NullFormatter())
         
-        # Show x-axis label and ticks only on bottom row
         if i==4:
-            ax[i,j].set_xlabel(r'$\ell$', fontsize=fontsize_text)
             ax[i,j].tick_params(axis='x', labelsize=fontsize_ticks)
         else:
             ax[i,j].tick_params(axis='x', labelbottom=False)
-        
-        # Show y-axis label and ticks only on left column
+
         if j==0:
-            ax[i,j].set_ylabel(r'$\mathcal{C}_\ell$', fontsize=fontsize_text)
             ax[i,j].tick_params(axis='y', labelsize=fontsize_ticks)
         else:
             ax[i,j].tick_params(axis='y', labelleft=False)
+
+fig.supxlabel(r'$\ell$', fontsize=fontsize_text)
+fig.supylabel(r'$\mathcal{C}_\ell$', fontsize=fontsize_text)
 
 # At the end, after the loops
 handles, labels = ax[0,0].get_legend_handles_labels()
 fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.88, 0.88), fontsize=18)
 plt.savefig(os.path.join(save_dir,"power-spectra-posterior.png"), bbox_inches='tight', pad_inches=0)
-                                        
+plt.savefig(os.path.join(save_dir,"power-spectra-posterior.pdf"), bbox_inches='tight', pad_inches=0)
+plt.close(fig)
+
+
+# Relative power spectrum: (Cl_th - Cl_sample) / Cl_th, using the theoretical
+# (jax_cosmo) Cl as reference instead of the noisy single realization.
+rel_auto_samples = (ps_auto_th[None] - ps_auto_samples) / ps_auto_th[None]
+# ps_cross_samples has shape (n_samples, n_ell, 5, 5); ps_cross_th is (5, 5, n_ell)
+ps_cross_th_for_rel = np.transpose(ps_cross_th, (2, 0, 1))[None]  # (1, n_ell, 5, 5)
+# avoid divide-by-zero on the diagonal of ps_cross_th (auto entries are 0 there)
+_safe = np.where(ps_cross_th_for_rel == 0, 1.0, ps_cross_th_for_rel)
+rel_cross_samples = (ps_cross_th_for_rel - ps_cross_samples) / _safe
+
+rel_auto_mean = rel_auto_samples.mean(0)
+rel_auto_std = rel_auto_samples.std(0)
+rel_cross_mean = rel_cross_samples.mean(0)
+rel_cross_std = rel_cross_samples.std(0)
+
+fig, ax = plt.subplots(5, 5, figsize=(10, 10))
+for i in range(5):
+    for j in range(5):
+        if j > i:
+            ax[i, j].axis('off')
+        else:
+            if i == j:
+                ax[i, j].axhline(0, color="k", alpha=1., label='Fiducial')
+                ax[i, j].plot(ell, rel_auto_mean[i], color='tab:blue', alpha=1, label="Posterior mean")
+                ax[i, j].fill_between(ell, rel_auto_mean[i] - rel_auto_std[i],
+                                      rel_auto_mean[i] + rel_auto_std[i],
+                                      color='tab:blue', alpha=0.3)
+                ax[i, j].set_xscale('log')
+            else:
+                ax[i, j].axhline(0, color='k')
+                ax[i, j].plot(ell, rel_cross_mean[:, i, j], color='tab:blue', alpha=1.)
+                ax[i, j].fill_between(ell, rel_cross_mean[:, i, j] - rel_cross_std[:, i, j],
+                                      rel_cross_mean[:, i, j] + rel_cross_std[:, i, j],
+                                      color='tab:blue', alpha=0.3)
+                ax[i, j].set_xscale('log')
+            ax[i, j].set_xlim(ell.min(), ell.max())
+            ax[i, j].xaxis.set_major_locator(LogLocator(base=10.0, numticks=3))
+            ax[i, j].yaxis.set_major_locator(MaxNLocator(nbins=4))
+            ax[i, j].xaxis.set_minor_formatter(NullFormatter())
+
+        if i == 4:
+            ax[i, j].tick_params(axis='x', labelsize=fontsize_ticks)
+        else:
+            ax[i, j].tick_params(axis='x', labelbottom=False)
+
+        if j == 0:
+            ax[i, j].tick_params(axis='y', labelsize=fontsize_ticks)
+        else:
+            ax[i, j].tick_params(axis='y', labelleft=False)
+
+fig.supxlabel(r'$\ell$', fontsize=fontsize_text)
+fig.supylabel(r'$(\mathcal{C}_\ell^{\rm truth}-\mathcal{C}_\ell^{\rm sample})/\mathcal{C}_\ell^{\rm truth}$', fontsize=fontsize_text)
+
+handles, labels = ax[0, 0].get_legend_handles_labels()
+fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.88, 0.88), fontsize=18)
+plt.savefig(os.path.join(save_dir, "power-spectra-posterior-relative.png"), bbox_inches='tight', pad_inches=0)
+plt.savefig(os.path.join(save_dir, "power-spectra-posterior-relative.pdf"), bbox_inches='tight', pad_inches=0)
+plt.close(fig)
+
+# Average relative error per auto bin and overall
+# Use mean across posterior samples, then absolute value, then average over ell
+avg_rel_err_per_bin = np.mean(np.abs(rel_auto_mean), axis=1)  # shape (5,)
+avg_rel_err_overall = np.mean(np.abs(rel_auto_mean))
+
+print("Average relative error per auto bin:")
+for i, err in enumerate(avg_rel_err_per_bin):
+    print(f"  bin {i}: {err:.4f}")
+print(f"Overall average relative error (auto): {avg_rel_err_overall:.4f}")
+
+
+# One-point function of the convergence fields per z-bin.
+# Use KDEs (smooth, paper-friendly) instead of histograms. Plot the truth as a
+# black line and posterior samples as a blue mean ± 1 sigma band.
+from scipy.stats import gaussian_kde
+
+n_kde_samples = min(64, len(x_samples_))
+
+fig, ax = plt.subplots(1, 5, figsize=(18, 4), sharey=False)
+for i in range(5):
+    truth_vals = np.asarray(m_data[..., i]).ravel()
+    lo, hi = np.percentile(truth_vals, [0.1, 99.9])
+    pad = 0.1 * (hi - lo)
+    grid = np.linspace(lo - pad, hi + pad, 400)
+
+    kde_truth = gaussian_kde(truth_vals)
+    pdf_truth = kde_truth(grid)
+
+    pdf_samples = np.zeros((n_kde_samples, grid.size))
+    for s in range(n_kde_samples):
+        vals = np.asarray(x_samples_[s, :, :, i]).ravel()
+        pdf_samples[s] = gaussian_kde(vals)(grid)
+    pdf_mean = pdf_samples.mean(0)
+    pdf_std = pdf_samples.std(0)
+
+    ax[i].plot(grid, pdf_truth, color='k', label='Fiducial')
+    ax[i].plot(grid, pdf_mean, color='tab:blue', label='Posterior mean')
+    ax[i].fill_between(grid, pdf_mean - pdf_std, pdf_mean + pdf_std,
+                       color='tab:blue', alpha=0.3)
+    ax[i].set_title(f'bin {i + 1}', fontsize=fontsize_text)
+    ax[i].tick_params(axis='both', labelsize=fontsize_ticks)
+    ax[i].xaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax[i].yaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax[i].set_xlim(grid[0], grid[-1])
+
+fig.supxlabel(r'$\kappa$', fontsize=fontsize_text)
+fig.supylabel(r'$p(\kappa)$', fontsize=fontsize_text)
+
+handles, labels = ax[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.08),
+           ncol=len(labels), fontsize=18, frameon=False)
+plt.savefig(os.path.join(save_dir, "one-point-function.png"), bbox_inches='tight', pad_inches=0)
+plt.savefig(os.path.join(save_dir, "one-point-function.pdf"), bbox_inches='tight', pad_inches=0)
+plt.close(fig)
+
