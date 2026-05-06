@@ -9,13 +9,25 @@ dependencies = [
     "datasets>=4.4.1",
     "dm-pix>=0.4.4",
     "einops>=0.8.1",
+    "flax>=0.12.6",
+    "jax-cosmo",
+    "lenstools",
     "matplotlib>=3.10.7",
+    "optax>=0.2.8",
+    "sbi-lens",
+    "tfp-nightly>=0.26.0.dev20260414",
+    "torch>=2.11.0",
     "wandb>=0.23.0",
 ]
 
 
 [tool.setuptools]
 packages = ["jade"]
+
+[tool.uv.sources]
+jax-cosmo = { path = "../jax_cosmo", editable = true }
+sbi-lens = { path = "../sbi_lens", editable = true }
+lenstools = { path = "../LensTools", editable = true }
 
 [dependency-groups]
 dev = [

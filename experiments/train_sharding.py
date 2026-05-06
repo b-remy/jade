@@ -1,9 +1,17 @@
 #!/usr/bin/env python
 
 import os
+import multiprocessing
+# DataLoader workers (spawn/forkserver) re-import this module; keep them off GPU
+# so they don't each try to grab a CUDA context and OOM.
+if multiprocessing.current_process().name != "MainProcess":
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 import argparse
 import yaml
 import gc
+import pickle
 
 import jax
 import jax.numpy as jnp
@@ -21,9 +29,14 @@ from jax.experimental import mesh_utils
 from datasets import load_from_disk
 from functools import partial
 
+import torch
+from torch.utils.data import DataLoader
+
 import matplotlib.pyplot as plt
 import wandb
 from tqdm import tqdm
+
+from getdist import MCSamples, plots
 
 # from jade.nn_one_token import JADE_B_16
 from jade.nn_patch import JADE_B_16_mixed
@@ -46,6 +59,17 @@ def augment(x, key):
     return x
 
 
+def hf_collate(batch):
+    """Collate HF examples (format='numpy') into a dict of stacked numpy arrays.
+
+    Only the keys needed for training are kept to avoid loading unused columns.
+    """
+    return {
+        "map": np.stack([b["map"] for b in batch]),
+        "theta": np.stack([b["theta"] for b in batch]),
+    }
+
+
 @jax.jit
 def normalize_batch(batch):
     """Normalize a batch from the dataset."""
@@ -63,6 +87,29 @@ def make_cond(x, key):
     cond = x + sigma_lsst.reshape((1,1,1,-1)) * jax.random.normal(key, shape=x.shape)
     cond = (cond - FIELD_MEAN.reshape(1, 1, 1, -1)) / FIELD_STD.reshape(1, 1, 1, -1)
     return cond
+
+def plot_corner(theta_post, mcmc_samples, theta_truth):
+    """Triangle plot comparing diffusion posterior to reference MCMC samples."""
+    names = [r"$\Omega_c$", r"$\Omega_b$", r"$\sigma_8$", r"$h_0$", r"$n_s$", r"$w_0$"]
+    s_post = MCSamples(samples=np.asarray(theta_post), names=names, label="Diffusion")
+    s_mcmc = MCSamples(samples=np.asarray(mcmc_samples), names=names, label="MCMC")
+
+    g = plots.get_subplot_plotter()
+    g.settings.axes_fontsize = 14
+    g.settings.axes_labelsize = 16
+    g.settings.legend_fontsize = 16
+    g.triangle_plot(
+        [s_post, s_mcmc],
+        names,
+        markers=np.asarray(theta_truth),
+        marker_args={"lw": 1},
+        filled=[True, False],
+        contour_colors=["#d06e99ff", "black"],
+        contour_ls=["-", "--"],
+        contour_lws=[2., 2.],
+    )
+    return plt.gcf()
+
 
 def create_optimizer(cfg, total_steps):
     """Create optimizer with optional learning rate schedule"""
@@ -249,18 +296,23 @@ def train(cfg):
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Load dataset
+    num_workers = cfg['data'].get('num_workers', 8)
     dataset = load_from_disk(cfg['data']['dataset_path'])
+    # Drop unused columns (z, g) so the DataLoader only reads map + theta from arrow
+    keep_cols = [c for c in ("map", "theta") if c in dataset.column_names]
+    dataset = dataset.select_columns(keep_cols)
     dataset = dataset.with_format("numpy")
-    
+
     dataset = dataset.train_test_split(
-        test_size=cfg['data']['val_split'], 
+        test_size=cfg['data']['val_split'],
         seed=cfg['data']['shuffle_seed']
     )
-    
+
     ds_train = dataset["train"]
     ds_val = dataset["test"]
     print(f"Train samples: {len(ds_train)}")
     print(f"Val samples: {len(ds_val)}")
+    print(f"DataLoader workers: {num_workers}")
 
     # ========================================================================
     # MODEL INITIALIZATION
@@ -455,15 +507,42 @@ def train(cfg):
     num_epochs = cfg['training']['num_epochs']
 
     # ========================================================================
+    # CORNER-PLOT REFERENCE: fixed observation + MCMC posterior samples
+    # ========================================================================
+    mcmc_ref_dir = cfg.get('logging', {}).get(
+        'mcmc_ref_dir', 'mcmc_log_normal'
+    )
+    corner_obs = None
+    corner_mcmc = None
+    corner_truth = None
+    try:
+        with open(os.path.join(mcmc_ref_dir, 'mcmc_log_obs_truth.pkl'), 'rb') as f:
+            ref = pickle.load(f)
+        with open(os.path.join(mcmc_ref_dir, 'mcmc_log_posterior_samples.pkl'), 'rb') as f:
+            corner_mcmc = pickle.load(f)
+        corner_obs = jnp.asarray(ref['y'])
+        corner_truth = np.asarray(ref['theta'])
+        print(f"Corner-plot reference loaded from {mcmc_ref_dir}")
+    except FileNotFoundError as e:
+        print(f"Corner-plot reference not found ({e}); skipping corner plots")
+
+    # ========================================================================
     # TRAINING LOOP
     # ========================================================================
-    for epoch in range(num_epochs):
-        loader = ds_train.shuffle(seed=lap*num_epochs + epoch).iter(
-            batch_size=cfg['training']['batch_size'], 
-            drop_last_batch=True
-        )
+    train_loader = DataLoader(
+        ds_train,
+        batch_size=cfg['training']['batch_size'],
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=hf_collate,
+        drop_last=True,
+        persistent_workers=num_workers > 0,
+        pin_memory=False,
+        multiprocessing_context='forkserver' if num_workers > 0 else None,
+    )
 
-        for batch in tqdm(loader, desc=f"Epoch {epoch+1}/{cfg['training']['num_epochs']}"):
+    for epoch in range(num_epochs):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg['training']['num_epochs']}"):
 
             batch = normalize_batch(batch)
 
@@ -518,9 +597,16 @@ def train(cfg):
         losses = []
         losses_x = []
         losses_cosmo = []
-        val_loader = ds_val.iter(
-            batch_size=cfg['training']['batch_size'], 
-            drop_last_batch=False
+        val_loader = DataLoader(
+            ds_val,
+            batch_size=cfg['training']['batch_size'],
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=hf_collate,
+            drop_last=False,
+            persistent_workers=num_workers > 0,
+            pin_memory=False,
+            multiprocessing_context='forkserver' if num_workers > 0 else None,
         )
         for batch in val_loader:
             batch = normalize_batch(batch)
@@ -549,14 +635,14 @@ def train(cfg):
         
         run.log({
             "val/loss_total": val_loss,
-            "val/loss_field": val_loss_x/cfg['loss']['SCALE_COSMO'],
-            "val/loss_cosmo": val_loss_cosmo,
+            "val/v_loss_field": val_loss_x,
+            "val/v_loss_cosmo": val_loss_cosmo,
             "epoch": epoch + 1,
         })
 
         model_type = "EMA" if cfg['ema']['use_ema'] else "Standard"
         print(f"Epoch {epoch + 1}, Val Loss ({model_type}): {val_loss:.4f} "
-              f"(Field: {val_loss_x:.4f}, Cosmo: {val_loss_cosmo:.4f})")
+              f"(v_field: {val_loss_x:.4f}, v_cosmo: {val_loss_cosmo:.4f})")
 
         # Visualization
         if (epoch + 1) % cfg['logging']['visualize_every_n_epochs'] == 0:
@@ -584,6 +670,23 @@ def train(cfg):
             fig = plot_samples(x_samples, cosmo_samples/cfg['loss']['SCALE_COSMO'], n_samples=6)
             wandb.log({"samples": wandb.Image(fig)})
             plt.close(fig)
+
+            # Corner plot: posterior on cosmology vs. reference MCMC for a fixed obs
+            if corner_obs is not None and cfg["model"]["enable_cond_image"]:
+                key, subkey = jax.random.split(key, 2)
+                n_corner = 128
+                corner_keys = jax.random.split(subkey, 3)
+                x0_c = jax.random.normal(corner_keys[0], shape=(n_corner, 128, 128, 5))
+                cosmo0_c = jax.random.normal(corner_keys[1], shape=(n_corner, 6))
+                vmap_keys = jax.random.split(corner_keys[2], n_corner)
+                cond_c = (corner_obs - FIELD_MEAN.reshape(1, 1, -1)) / FIELD_STD.reshape(1, 1, -1)
+                _, cosmo_post = jax.vmap(sampler, in_axes=(0, 0, None, 0))(
+                    x0_c, cosmo0_c, cond_c, vmap_keys
+                )
+                theta_post = np.asarray(cosmo_post) / cfg['loss']['SCALE_COSMO'] * THETA_STD + THETA_MEAN
+                fig = plot_corner(theta_post, corner_mcmc, corner_truth)
+                wandb.log({"corner": wandb.Image(fig)})
+                plt.close('all')
 
         # Restore original params if using EMA
         if cfg['ema']['use_ema'] and ema_params is not None:

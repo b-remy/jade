@@ -82,18 +82,22 @@ def rotate_half(x):
     return rearrange(x, '... d r -> ... (d r)')
 
 
-def scaled_dot_product_attention(query, key, value, dropout_p=0.0, dropout_key=None):
+def scaled_dot_product_attention(query, key, value, dropout_p=0.0, dropout_key=None, attn_mask=None):
     """
     Scaled dot-product attention WITHOUT batch dimension.
     query/key/value: (H, L/S, D)
     dropout_key: if not None and dropout_p > 0, apply dropout to attention weights
+    attn_mask: optional additive (L, S) mask (broadcasts over heads); -inf
+        entries are zeroed out by the softmax. Used to block θ→κ in stage 2.
     """
     scale_factor = 1.0 / math.sqrt(query.shape[-1])
-    
+
     query_f32 = query.astype(jnp.float32)
     key_f32 = key.astype(jnp.float32)
-    
+
     attn_weight = jnp.einsum('hld,hsd->hls', query_f32, key_f32) * scale_factor
+    if attn_mask is not None:
+        attn_weight = attn_weight + attn_mask
     attn_weight = jax.nn.softmax(attn_weight, axis=-1)
     
     if dropout_key is not None and dropout_p > 0.0:
@@ -117,57 +121,82 @@ class LabelEmbedder(nnx.Module):
     
 
 class Attention(nnx.Module):
-    """Multi-head attention with RMSNorm and RoPE support."""
-    
-    def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True, 
-                 attn_drop=0., proj_drop=0., rngs=None):
+    """Multi-head attention with RMSNorm and RoPE support.
+
+    If ``num_theta_tokens > 0``, the QKV projection is split per-modality:
+    the first ``num_theta_tokens`` positions are projected by ``qkv_theta`` and
+    the remaining positions by ``qkv_kg``. The two projections are initialized
+    independently but produce the same output as a single shared ``qkv`` when
+    their weights are equal — used for two-stage training (stage 2 freezes
+    ``qkv_kg`` so cosmology gradients only flow through ``qkv_theta``).
+    """
+
+    def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True,
+                 attn_drop=0., proj_drop=0., num_theta_tokens=0, rngs=None):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        
-        self.qkv = nnx.Linear(dim, dim * 3, use_bias=qkv_bias, rngs=rngs)
-        
+        self.num_theta_tokens = num_theta_tokens
+        self.split_qkv = num_theta_tokens > 0
+
+        if self.split_qkv:
+            rng_keys = jax.random.split(rngs(), 2)
+            rngs_theta = nnx.Rngs(rng_keys[0])
+            rngs_kg = nnx.Rngs(rng_keys[1])
+            self.qkv_theta = nnx.Linear(dim, dim * 3, use_bias=qkv_bias, rngs=rngs_theta)
+            self.qkv_kg = nnx.Linear(dim, dim * 3, use_bias=qkv_bias, rngs=rngs_kg)
+        else:
+            self.qkv = nnx.Linear(dim, dim * 3, use_bias=qkv_bias, rngs=rngs)
+
         if qk_norm:
             self.q_norm = RMSNorm(self.head_dim, rngs=rngs)
             self.k_norm = RMSNorm(self.head_dim, rngs=rngs)
         else:
             self.q_norm = lambda x: x
             self.k_norm = lambda x: x
-        
+
         self.attn_drop_p = attn_drop
         self.proj_drop_p = proj_drop
         self.proj = nnx.Linear(dim, dim, rngs=rngs)
-    
-    def __call__(self, x, rope, train=False, key=None):
+
+    def __call__(self, x, rope, train=False, key=None, attn_mask=None):
         """
         Args:
             x: (N, C)
             rope: RoPE function
             train: training mode
             key: JAX random key for dropout (None = no dropout)
+            attn_mask: optional additive (N, N) mask passed to softmax
         """
         N, C = x.shape
-        
-        qkv = self.qkv(x)
-        qkv = rearrange(qkv, 'N (three H D) -> three H N D', 
+
+        if self.split_qkv:
+            n_theta = self.num_theta_tokens
+            qkv_t = self.qkv_theta(x[:n_theta])
+            qkv_kg = self.qkv_kg(x[n_theta:])
+            qkv = jnp.concatenate([qkv_t, qkv_kg], axis=0)
+        else:
+            qkv = self.qkv(x)
+        qkv = rearrange(qkv, 'N (three H D) -> three H N D',
                        three=3, H=self.num_heads, D=self.head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]
-        
+
         q = self.q_norm(q)
         k = self.k_norm(k)
-        
+
         q = rope(q)
         k = rope(k)
-        
+
         # Split key for attn dropout and proj dropout
         attn_key = None
         proj_key = None
         if train and key is not None:
             attn_key, proj_key = jax.random.split(key)
-        
+
         x = scaled_dot_product_attention(
             q, k, v,
             dropout_p=self.attn_drop_p if train else 0.0,
-            dropout_key=attn_key
+            dropout_key=attn_key,
+            attn_mask=attn_mask,
         )
         
         x = rearrange(x, 'H N D -> N (H D)')
@@ -272,15 +301,16 @@ def modulate(x, shift, scale):
 
 class JiTBlock(nnx.Module):
     """JiT Transformer Block with Adaptive Layer Normalization."""
-    
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, 
-                 attn_drop=0.0, proj_drop=0.0, rngs=None):
+
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0,
+                 attn_drop=0.0, proj_drop=0.0, num_theta_tokens=0, rngs=None):
         self.norm1 = RMSNorm(hidden_size, eps=1e-6, rngs=rngs)
         self.norm2 = RMSNorm(hidden_size, eps=1e-6, rngs=rngs)
-        
+
         self.attn = Attention(
             hidden_size, num_heads=num_heads, qkv_bias=True, qk_norm=True,
-            attn_drop=attn_drop, proj_drop=proj_drop, rngs=rngs
+            attn_drop=attn_drop, proj_drop=proj_drop,
+            num_theta_tokens=num_theta_tokens, rngs=rngs
         )
         
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -288,19 +318,19 @@ class JiTBlock(nnx.Module):
         
         self.ada_linear = nnx.Linear(hidden_size, 6 * hidden_size, rngs=rngs)
     
-    def __call__(self, x, c, feat_rope=None, train=False, key=None):
+    def __call__(self, x, c, feat_rope=None, train=False, key=None, attn_mask=None):
         ada = self.ada_linear(nnx.silu(c))
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(ada, 6, axis=-1)
-        
+
         # Split key for attn and mlp dropout
         attn_key = None
         mlp_key = None
         if train and key is not None:
             attn_key, mlp_key = jax.random.split(key)
-        
+
         x = x + jnp.expand_dims(gate_msa, -2) * self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa), 
-            rope=feat_rope, train=train, key=attn_key
+            modulate(self.norm1(x), shift_msa, scale_msa),
+            rope=feat_rope, train=train, key=attn_key, attn_mask=attn_mask,
         )
         
         x = x + jnp.expand_dims(gate_mlp, -2) * self.mlp(
@@ -541,6 +571,8 @@ class JADE(nnx.Module):
         cond_channels=5,
         enable_cond_image=True,
         cond_start=None,        # ← NEW: block index where conditioning is injected
+        split_qkv=False,        # ← NEW: per-modality QKV (stage 2)
+        mask_theta_to_field=False,  # ← NEW: block θ→κ in attention (stage 2 obs-only)
         rngs=None
     ):
         self.in_channels = in_channels
@@ -554,7 +586,9 @@ class JADE(nnx.Module):
         self.num_cosmo_tokens = num_cosmo_tokens
         self.cond_channels = cond_channels
         self.enable_cond_image = enable_cond_image
-        
+        self.split_qkv = split_qkv
+        self.mask_theta_to_field = mask_theta_to_field
+
         # Default: inject conditioning at 1/3 of depth (early layers process cosmo+field only)
         self.cond_start = cond_start if cond_start is not None else depth // 3
         
@@ -630,11 +664,15 @@ class JADE(nnx.Module):
             )
 
         # --- Transformer blocks ---
+        # When split_qkv is on, the first num_cosmo_tokens positions of each
+        # block input are projected by qkv_theta and the rest by qkv_kg.
+        num_theta_tokens = num_cosmo_tokens if split_qkv else 0
         self.blocks = nnx.List([
             JiTBlock(
                 hidden_size, num_heads, mlp_ratio=mlp_ratio,
                 attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
                 proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
+                num_theta_tokens=num_theta_tokens,
                 rngs=rngs_blocks[i]
             )
             for i in range(depth)
@@ -645,7 +683,32 @@ class JADE(nnx.Module):
         self.cosmo_head = CosmologyPredictor(
             hidden_size, cosmo_dim, num_tokens=num_cosmo_tokens, rngs=rngs_cosmo_head
         )
-        
+
+        # --- Static θ→κ attention masks (stage-2 Level A "obs-only") ---
+        # The sequence layout is:
+        #   pre-cond layers  : [cosmo (n_θ) | field (n_κ)]
+        #   post-cond layers : [cosmo (n_θ) | cond (n_γ) | field (n_κ)]
+        # In both cases field tokens are the LAST n_κ positions, so the mask
+        # is built as: rows [0:n_θ] (θ queries) × cols [N - n_κ : N] (field
+        # keys) → -inf, everything else 0. The softmax then drops θ→κ scores.
+        self._theta_mask_nocond = None
+        self._theta_mask_cond = None
+        if mask_theta_to_field:
+            n_theta = num_cosmo_tokens
+            n_field = num_field_patches
+
+            N_nc = n_theta + n_field
+            mask_nc = jnp.zeros((N_nc, N_nc), dtype=jnp.float32)
+            mask_nc = mask_nc.at[:n_theta, n_theta:].set(-jnp.inf)
+            self._theta_mask_nocond = nnx.data(mask_nc)
+
+            if enable_cond_image:
+                n_cond = (input_size // cond_patch_size) ** 2
+                N_c = n_theta + n_cond + n_field
+                mask_c = jnp.zeros((N_c, N_c), dtype=jnp.float32)
+                mask_c = mask_c.at[:n_theta, N_c - n_field:].set(-jnp.inf)
+                self._theta_mask_cond = nnx.data(mask_c)
+
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -666,7 +729,11 @@ class JADE(nnx.Module):
         init_linear_xavier(self.cosmo_head.proj)
         
         for block in self.blocks:
-            init_linear_xavier(block.attn.qkv)
+            if block.attn.split_qkv:
+                init_linear_xavier(block.attn.qkv_theta)
+                init_linear_xavier(block.attn.qkv_kg)
+            else:
+                init_linear_xavier(block.attn.qkv)
             init_linear_xavier(block.attn.proj)
             init_linear_xavier(block.mlp.w12)
             init_linear_xavier(block.mlp.w3)
@@ -787,10 +854,13 @@ class JADE(nnx.Module):
             # Select RoPE based on whether conditioning is present
             if using_cond and i >= self.cond_start:
                 rope = self.feat_rope_cond
+                attn_mask = self._theta_mask_cond
             else:
                 rope = self.feat_rope_nocond
-            
-            x = block(x, c, feat_rope=rope, train=train, key=block_keys[i])
+                attn_mask = self._theta_mask_nocond
+
+            x = block(x, c, feat_rope=rope, train=train, key=block_keys[i],
+                      attn_mask=attn_mask)
         
         # --- Split output tokens ---
         idx = 0
@@ -814,12 +884,53 @@ class JADE(nnx.Module):
 # Model constructor
 # =============================================================================
 
-def JADE_B_16(rngs, cosmo_dim=6, patch_size=8, enable_cond_image=True, cond_channels=5, 
-                    num_cosmo_tokens=16, cond_patch_size=16, cond_start=None, **kwargs):
+def convert_state_split_qkv(state):
+    """Convert a shared-QKV stage-1 state to the split-QKV stage-2 layout.
+
+    For every transformer block, replaces ``attn.qkv`` with two independent
+    copies, ``attn.qkv_theta`` and ``attn.qkv_kg``, both initialised from the
+    same shared weights. At t=0 of stage 2 this makes the split model
+    bit-identical to the stage-1 model on the forward pass; freezing
+    ``qkv_kg`` then keeps the κγ-token projections fixed while ``qkv_theta``
+    is updated.
+
+    Accepts state either at the JADE level or wrapped under a ``model`` key
+    by the Denoiser.
+
+    Args:
+        state: nnx state from a stage-1 (shared-QKV) JADE model.
+
+    Returns:
+        A deep-copied state with ``qkv`` replaced by ``qkv_theta`` and
+        ``qkv_kg`` in every transformer block. Non-attention entries pass
+        through unchanged.
+    """
+    import copy as _copy
+
+    new_state = _copy.deepcopy(state)
+    blocks_state = (
+        new_state['model']['blocks'] if 'model' in new_state else new_state['blocks']
+    )
+
+    for k in list(blocks_state.keys()):
+        attn = blocks_state[k]['attn']
+        if 'qkv' not in attn:
+            continue
+        qkv = attn['qkv']
+        attn['qkv_theta'] = _copy.deepcopy(qkv)
+        attn['qkv_kg'] = _copy.deepcopy(qkv)
+        del attn['qkv']
+
+    return new_state
+
+
+def JADE_B_16(rngs, cosmo_dim=6, patch_size=8, enable_cond_image=True, cond_channels=5,
+                    num_cosmo_tokens=16, cond_patch_size=16, cond_start=None,
+                    split_qkv=False, mask_theta_to_field=False, **kwargs):
     """Base model with mixed patch sizes: 8 for target, 16 for conditioning."""
     return JADE(
-        depth=12, 
-        hidden_size=768, 
+        depth=12,
+        hidden_size=768,
         num_heads=12,
         bottleneck_dim=128,
         cosmo_dim=cosmo_dim,
@@ -828,8 +939,10 @@ def JADE_B_16(rngs, cosmo_dim=6, patch_size=8, enable_cond_image=True, cond_chan
         patch_size=patch_size,
         cond_patch_size=cond_patch_size,
         num_cosmo_tokens=num_cosmo_tokens,
-        cond_start=cond_start,      # ← NEW: defaults to depth//3 = 4
-        rngs=rngs, 
+        cond_start=cond_start,                  # defaults to depth//3 = 4
+        split_qkv=split_qkv,                    # per-modality QKV for stage 2
+        mask_theta_to_field=mask_theta_to_field,  # block θ→κ in attention
+        rngs=rngs,
         **kwargs
     )
 

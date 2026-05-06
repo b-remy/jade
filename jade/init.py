@@ -12,6 +12,10 @@ THETA_STD = np.array([0.17090547, 0.00601253, 0.1402754 , 0.06292731, 0.08028358
 FIELD_MEAN = np.array([0., 0., 0., 0., 0.])
 FIELD_STD = np.array([0.00468968, 0.01021258, 0.01501551, 0.02049607, 0.02891253])
 
+# GRF g mean and std
+GRF_MEAN = np.array([0., 0., 0., 0., 0.])
+GRF_STD = np.array([0.48319262, 0.389879, 0.32836843, 0.27031878, 0.21253702])
+
 # lsst noise level
 
 map_size = 5
