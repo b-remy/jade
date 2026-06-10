@@ -32,7 +32,7 @@ from functools import partial
 
 def main():
 
-    save_dir = "./mcmc_log_normal_sample"
+    save_dir = "./mcmc_log_normal"
     os.makedirs(save_dir, exist_ok=True)
 
     # sample at Planck15 fiducial cosmology
@@ -105,7 +105,7 @@ def main():
         map_size=5.,
         model=model_log_normal,
         m_data=obs,
-        num_results=4_000,
+        num_results=3_000,
         num_warmup=500,
         nb_loop=1,
         init_strat=numpyro.infer.init_to_value(values=init_values),
