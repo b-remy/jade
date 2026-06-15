@@ -50,22 +50,26 @@ def setup_model(N=128, map_size=5, with_noise=False):
 # Batch generation
 # ------------------------------------------------------------------
 
-def generate_batch(model, key, batch_size, with_noise=False):
-    sample_fn = partial(
-        get_samples,
-        model=model,
-        batch_size=batch_size,
-        with_noise=with_noise,
+def make_sample_fn(model, batch_size, with_noise=False):
+    """Build the jitted sampling function once so it is reused (compiled a
+    single time) across all batches, instead of recompiling per batch."""
+    return jax.jit(
+        partial(
+            get_samples,
+            model=model,
+            batch_size=batch_size,
+            with_noise=with_noise,
+        )
     )
 
-    _, samples = jax.jit(sample_fn)(key=key)
 
-    z = samples["z"].transpose(0, 2, 3, 1)  # [batch_size, nbins, N, N]
-    g = samples["g"].transpose(0, 2, 3, 1)  # [batch_size, nbins, N, N]
-    maps = samples["y"]
+def generate_batch(sample_fn, key):
+    _, samples = sample_fn(key=key)
+
+    maps = samples["y"]  # convergence map (kappa), [batch_size, N, N, nbins]
     theta = samples["theta"]
 
-    return z, g, maps, theta
+    return maps, theta
 
 # ------------------------------------------------------------------
 # Generator
@@ -85,17 +89,16 @@ def sample_generator(
     key = jax.random.fold_in(base_key, job_id)
 
     model = setup_model(N=N, map_size=map_size, with_noise=with_noise)
+    sample_fn = make_sample_fn(model, batch_size, with_noise)
 
     num_batches = total_samples // batch_size
 
     for _ in tqdm(range(num_batches)):
         key, subkey = jax.random.split(key)
-        z, g, maps, theta = generate_batch(model, subkey, batch_size, with_noise)
+        maps, theta = generate_batch(sample_fn, subkey)
 
         for i in range(batch_size):
             yield {
-                "z": z[i],
-                "g": g[i],
                 "map": maps[i],
                 "theta": theta[i],
             }
@@ -131,18 +134,13 @@ def generate_dataset(
     print("Determining data structure...")
     #test_key, _ = jax.random.split(job_key)
     test_key = jax.random.key(0)
-    test_z, test_g, test_maps, test_theta = generate_batch(
-        model, test_key, 1, with_noise
-    )
+    test_sample_fn = make_sample_fn(model, 1, with_noise)
+    test_maps, test_theta = generate_batch(test_sample_fn, test_key)
 
-    z_shape = test_z.shape[1:]
-    g_shape = test_g.shape[1:]
     map_shape = test_maps.shape[1:]
     n_params = test_theta.shape[1]
 
     features = Features({
-        "z": Array3D(dtype="float32", shape=z_shape),
-        "g": Array3D(dtype="float32", shape=g_shape),
         "map": Array3D(dtype="float32", shape=map_shape),
         "theta": Sequence(Value(dtype="float32"), length=n_params),
     })
