@@ -43,7 +43,7 @@ from jade.nn_patch import JADE_B_16_mixed
 from jade.nn_hybrid import JADE_B_16
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD, sigma_lsst
 from jade.flow import Denoiser, FlowLoss
-from jade.sampling import EulerSampler
+from jade.sampling import EulerSampler, HeunSampler 
 from jade.utils import dump_model, load_model, denormalize_fields, denormalize_cosmo, plot_denoiser, plot_samples
 
 @jax.jit
@@ -347,8 +347,9 @@ def train(cfg):
     # CHECKPOINT LOADING (with re-sharding if needed)
     # ========================================================================
     if cfg['start_from_checkpoint']:
-        print(f"Loading model from checkpoint: {cfg['params_path']}")
-        _, ema_params = load_model(cfg['params_path'], f"{cfg['model']['name']}_ema_latest")
+        params_tag = cfg.get('params_tag', 'ema_latest')
+        print(f"Loading model from checkpoint: {cfg['params_path']} (tag: {params_tag})")
+        _, ema_params = load_model(cfg['params_path'], f"{cfg['model']['name']}_{params_tag}")
         
         # Re-shard loaded params if using FSDP
         if use_sharding and mesh is not None:
@@ -653,7 +654,7 @@ def train(cfg):
         
             key, subkey = jax.random.split(key, 2)
             
-            sampler = EulerSampler(model=model, num_steps=50)
+            sampler = HeunSampler(model=model, num_steps=50)
             
             keys = jax.random.split(subkey, 3)
             x_0 = jax.random.normal(keys[0], shape=(6, 128, 128, 5))
