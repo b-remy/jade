@@ -23,16 +23,16 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro import sample
 from numpyro.handlers import condition, reparam, seed, trace
+from numpyro.infer.reparam import LocScaleReparam, TransformReparam
 
 from sbi_lens.config import config_lsst_y_10
 from sbi_lens.simulator.LogNormal_field import lensingLogNormal
-from sbi_lens.simulator.utils import get_reference_sample_posterior_full_field
 
 from functools import partial
 
 def main():
 
-    save_dir = "./mcmc_log_normal"
+    save_dir = "./mcmc_log_normal_traced"
     os.makedirs(save_dir, exist_ok=True)
 
     # sample at Planck15 fiducial cosmology
@@ -99,20 +99,82 @@ def main():
     # initialize from the truth
     init_values = {k: model_trace[k]['value'] for k in ['z', 'omega_c', 'sigma_8', 'omega_b', 'h_0', 'n_s', 'w_0']}
 
-    samples_mcmc = get_reference_sample_posterior_full_field(
-        run_mcmc=True,
-        N = 128,
-        map_size=5.,
-        model=model_log_normal,
-        m_data=obs,
-        num_results=3_000,
-        num_warmup=500,
-        nb_loop=1,
-        init_strat=numpyro.infer.init_to_value(values=init_values),
-        num_chains=10,
-        chain_method="vectorized",
-        key=key
+    num_results = 3_000
+    num_warmup = 500
+    num_chains = 10
+    max_tree_depth = 6
+    step_size = 1e-2
+
+    # Build the NUTS sampler inline (mirrors
+    # get_reference_sample_posterior_full_field) so we can collect the
+    # `num_steps` diagnostic, i.e. the number of leapfrog steps per iteration.
+    # Each leapfrog step is one gradient evaluation of the model = one
+    # simulator call, so summing num_steps gives the exact simulator-call count.
+    def config(x):
+        if type(x["fn"]) is dist.TransformedDistribution:
+            return TransformReparam()
+        elif (
+            type(x["fn"]) is dist.Normal or type(x["fn"]) is dist.TruncatedNormal
+        ) and ("decentered" not in x["name"]):
+            return LocScaleReparam(centered=0)
+        else:
+            return None
+
+    observed_model = condition(model_log_normal, {"y": obs})
+    observed_model_reparam = reparam(observed_model, config=config)
+
+    nuts_kernel = numpyro.infer.NUTS(
+        model=observed_model_reparam,
+        init_strategy=numpyro.infer.init_to_value(values=init_values),
+        max_tree_depth=max_tree_depth,
+        step_size=step_size,
     )
+    mcmc = numpyro.infer.MCMC(
+        nuts_kernel,
+        num_warmup=num_warmup,
+        num_samples=num_results,
+        num_chains=num_chains,
+        chain_method="vectorized",
+        progress_bar=True,
+    )
+
+    # Warmup is run separately with collect_warmup=True because mcmc.run() does
+    # not expose extra fields for the warmup phase (whose trajectories are often
+    # the deepest, during step-size adaptation).
+    mcmc.warmup(key, extra_fields=("num_steps",), collect_warmup=True)
+    warmup_num_steps = np.asarray(mcmc.get_extra_fields()["num_steps"])
+
+    mcmc.run(mcmc.post_warmup_state.rng_key, extra_fields=("num_steps",))
+    sample_num_steps = np.asarray(mcmc.get_extra_fields()["num_steps"])
+
+    n_warmup_calls = int(warmup_num_steps.sum())
+    n_sample_calls = int(sample_num_steps.sum())
+    n_total_calls = n_warmup_calls + n_sample_calls
+    n_iters = num_chains * (num_warmup + num_results)
+
+    print(
+        f"[sim-call tracer] chains={num_chains} warmup={num_warmup} "
+        f"results={num_results} max_tree_depth={max_tree_depth}"
+    )
+    print(f"[sim-call tracer] warmup   gradient evals: {n_warmup_calls:,}")
+    print(f"[sim-call tracer] sampling gradient evals: {n_sample_calls:,}")
+    print(f"[sim-call tracer] TOTAL    gradient evals: {n_total_calls:,}")
+    print(f"[sim-call tracer] mean leapfrog / iter   : {n_total_calls / n_iters:.1f}")
+
+    samples_ = mcmc.get_samples()
+    samples_mcmc = jnp.stack(
+        [samples_[name] for name in params_name], axis=-1
+    )
+
+    diagnostics = {
+        "warmup_num_steps": warmup_num_steps,
+        "sample_num_steps": sample_num_steps,
+        "n_warmup_calls": n_warmup_calls,
+        "n_sample_calls": n_sample_calls,
+        "n_total_calls": n_total_calls,
+    }
+    with open(os.path.join(save_dir, "mcmc_log_num_steps.pkl"), "wb") as f:
+        pickle.dump(diagnostics, f)
 
     with open(os.path.join(save_dir, "mcmc_log_posterior_samples.pkl"), "wb") as f:
         pickle.dump(samples_mcmc, f)
