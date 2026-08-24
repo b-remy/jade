@@ -39,8 +39,8 @@ optimizer:
   
   use_schedule: true
   schedule:
-    init_value: 1e-3
-    end_value: 1e-4
+    init_value: 1e-4
+    end_value: 5e-5
 
 # EMA configuration
 ema:
@@ -86,5 +86,6 @@ loss:
   lambda_cosmo: 10. # 1.0
   SCALE_COSMO: 1
 
-start_from_checkpoint: false
+start_from_checkpoint: true
+params_path: "/u/bremy/repos/jade/experiments/wandb/run-20260226_093505-3gytbpbd/files/checkpoints"
 lap: 0

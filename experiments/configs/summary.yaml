@@ -1,0 +1,124 @@
+# From-scratch training of the cond-summary architecture
+# (jade.nn_hybrid_summary.JADE_B_16). Mirrors hybrid.yaml (the validated
+# stage-1 recipe) and only swaps the architecture flag + adds the summary
+# tower kwargs. Run with:
+#   python train_sharding.py --config configs/summary.yaml
+
+model:
+  # "hybrid" (validated nn_hybrid.JADE_B_16) or
+  # "hybrid_summary" (nn_hybrid_summary.JADE_B_16 with cond-summary head).
+  arch: "hybrid_summary"
+  name: "JADE_B_16"
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: true
+  cond_channels: 5
+  patch_size: 8
+  cond_patch_size: 8
+  num_cosmo_tokens: 16
+  cond_start: 0
+  attn_drop: 0.3
+  proj_drop: 0.3
+  # Cond-summary tower (small ViT over cond, CLS-pooled).
+  use_cond_summary: true
+  summary_hidden: 384
+  summary_depth: 4
+  summary_heads: 6
+  summary_patch_size: 16
+
+training:
+  num_epochs: 1200
+  batch_size: 128
+  seed: 42
+  use_mixed_precision: true
+  precision: "bfloat16"
+
+distributed:
+  use_sharding: true
+
+optimizer:
+  type: "adamw"
+  learning_rate: 1e-5
+  weight_decay: 0.
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+  use_schedule: true
+  schedule:
+    init_value: 5e-3
+    end_value: 1e-4
+
+ema:
+  use_ema: true
+  # 0.9996 (~6-epoch effective window at batch=128, 1200-epoch run) matches
+  # the validated stage-1 hybrid.yaml recipe — appropriate for from-scratch.
+  decay: 0.9996
+
+diffusion:
+  model: "linear"
+  time_distribution: "logit"
+  # Per-modality time conditioning: t_κ and t_θ are drawn independently per
+  # training sample, each from its own logit-normal. Forward-noises κ at σ(t_κ)
+  # and θ at σ(t_θ); the model receives both ts (averaged in AdaLN). This
+  # exposes the model to off-diagonal (t_κ, t_θ) combinations — in particular
+  # (clean κ, noisy θ) — which is exactly the regime where lensing-degeneracy
+  # breaking happens (the model has to extract degeneracy-breaking features
+  # from clean κ to refine θ).
+  #
+  # mu/sigma are the legacy single-t fallback (only used if mu_kappa/mu_theta
+  # are missing). Kept here for backward compat.
+  mu: -0.8
+  sigma: 0.8
+  t_eps: 0.05
+  # κ schedule: standard Li et al. logit-normal (median t_κ = 0.345, ±2σ
+  # covers t_κ ∈ [0.10, 0.71]). Biased toward high noise where image
+  # structure learning happens. Same as the validated stage-1 recipe.
+  mu_kappa: -0.8
+  sigma_kappa: 0.8
+  # θ schedule: biased toward LOW t (high noise) for the amortized cond → θ
+  # regime, which the per-t MSE diagnostic showed was the under-trained part
+  # of the schedule (MSE_θ at t=0.05 was ~0.61, vs 0.003 at t=0.95).
+  # Median t_θ = sigmoid(σ_θ · μ_θ) = sigmoid(-1.5) = 0.18 (high noise on θ);
+  # ±1σ in s: t_θ ∈ [0.05, 0.50] (68% mass at moderate-to-high noise where the
+  # marginal posterior shape gets established);
+  # ±2σ: t_θ ∈ [0.011, 0.82] — long high-noise tail still covers the
+  # pure-amortized regime, and the smaller high-t tail (~5% mass at t>0.7)
+  # combined with v-loss's 1/(1-t)² weighting trains refinement adequately.
+  mu_theta: -1.0
+  sigma_theta: 1.5
+
+data:
+  dataset_path: "sbi_lens_full"
+  val_split: 0.05
+  shuffle_seed: 42
+  # 16 workers paired with cpus-per-task=16 in train_summary.slurm: each
+  # worker pinned to its own CPU, queue depth 16×prefetch=64 batches —
+  # enough to absorb filesystem-latency jitter and keep GPU >90% utilized.
+  num_workers: 16
+
+checkpoint:
+  dir: "checkpoints"
+  save_every_n_epochs: 1
+  keep_best: true
+  # Persist a numbered EMA snapshot every N epochs (in addition to *_latest
+  # and *_best) so we can pick the peak-calibration checkpoint retroactively
+  # via diagnose_posterior.py. Set to 0 to disable.
+  snapshot_every_n_epochs: 50
+
+logging:
+  project: "jade"
+  entity: "b-remy"
+  # Bumped 10 → 50: each log call forces a GPU sync via jax.device_get(loss)
+  # for wandb serialization; fewer syncs = fewer pipeline stalls. Train loss
+  # is noisy at step granularity, no info lost.
+  log_every_n_steps: 50
+  visualize_every_n_epochs: 10
+  mcmc_ref_dir: "mcmc_log_normal"
+
+loss:
+  type: "v-loss"
+  mixture: false
+  lambda_cosmo: 10.
+  SCALE_COSMO: 1
+
+start_from_checkpoint: false

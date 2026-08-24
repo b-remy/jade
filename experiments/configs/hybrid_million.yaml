@@ -1,0 +1,108 @@
+# JADE training on the 1M-sample lognormal dataset (sbi_lens_million_full).
+#
+# Based on hybrid.yaml (run with train_sharding.py / jade.flow). Two changes
+# vs hybrid.yaml matter here:
+#   1. data.dataset_path -> the new 1,000,000-sample dataset (10x bigger than
+#      sbi_lens_full, which had ~100k). Each epoch is ~10x longer, so
+#      num_epochs is scaled down to keep a comparable total step count.
+#   2. model.attn_impl: "cudnn" enables FlashAttention (fused bf16 attention)
+#      for lower memory + faster attention. Requires attn_drop=0.0, since the
+#      fused kernel can't apply attention dropout (it would silently fall back
+#      to the dense path otherwise). With 1M samples overfitting pressure is
+#      low, so disabling attention dropout is a reasonable trade.
+
+# Model configuration
+model:
+  name: "JADE_B_16"
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: true
+  cond_channels: 5
+  patch_size: 8
+  cond_patch_size: 8
+  num_cosmo_tokens: 16
+  cond_start: 0
+  attn_drop: 0.0          # 0 so FlashAttention engages (no attn dropout in fused kernel)
+  proj_drop: 0.0          # output-projection dropout (independent of the attn backend)
+  attn_impl: "cudnn"      # "dense" | "xla" | "cudnn". cudnn = FlashAttention (GPU, bf16).
+                          # Use "xla" if the cudnn kernel is unavailable; "dense" for the
+                          # exact float32 reference path.
+
+# Training configuration
+training:
+  num_epochs: 600         # full 600 epochs (each is ~10x longer than hybrid.yaml given the 10x bigger dataset)
+  batch_size: 200         # bumped from 200 (FlashAttention frees attention memory); 512 OOM'd on the GH200
+  seed: 42
+  use_mixed_precision: true
+  precision: "bfloat16"
+
+# Distributed training configuration
+distributed:
+  use_sharding: true      # FSDP across multiple GPUs
+
+# Optimizer configuration
+optimizer:
+  type: "adamw"
+  learning_rate: 1e-5
+  weight_decay: 0.
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+
+  use_schedule: true
+  schedule:
+    init_value: 5e-3
+    end_value: 1e-4
+
+# EMA configuration
+ema:
+  use_ema: true
+  decay: 0.9996
+
+# Diffusion configuration
+diffusion:
+  model: "linear"
+  time_distribution: "logit"
+  mu: -0.8
+  sigma: 0.8
+  t_eps: 0.05
+
+# Data configuration
+data:
+  dataset_path: "sbi_lens_million_full"   # -> /work/hdd/benb/bremy/sbi_lens_million_full (999,985 samples)
+  val_split: 0.05
+  shuffle_seed: 42
+  # Dataset is staged to node-local NVMe (see train_million.slurm), which is so
+  # fast that only a few reader workers are needed to keep the GPU saturated.
+  # Keep this modest: validation spins up a 2nd worker pool while the train pool
+  # is still alive (~2x workers briefly), so too many OOMs the 118GB RAM cap.
+  num_workers: 16
+  prefetch_factor: 8
+
+# Checkpoint configuration
+checkpoint:
+  dir: "checkpoints"
+  save_every_n_epochs: 1
+  keep_best: true
+
+# Validation configuration
+validation:
+  # Cap val-loss evaluation to this many batches (shuffle=False => fixed subset).
+  # ~50k val samples is overkill for monitoring; 20 x batch_size ≈ 5k is stable.
+  max_batches: 20
+
+# Logging configuration
+logging:
+  project: "jade"
+  entity: "b-remy"
+  log_every_n_steps: 10
+  visualize_every_n_epochs: 1   # visualize every epoch
+
+# Loss configuration
+loss:
+  type: "v-loss"
+  mixture: false
+  lambda_cosmo: 10.
+  SCALE_COSMO: 1
+
+start_from_checkpoint: false

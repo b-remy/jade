@@ -1,488 +1,316 @@
+"""EDM-style diffusion model for joint (field, cosmology) inference.
+
+Implements the preconditioning, loss, and samplers from:
+    Karras et al. (2022) "Elucidating the Design Space of Diffusion-Based
+    Generative Models" (https://arxiv.org/abs/2206.00364)
+
+The same network is used jointly for the lensing field x and the cosmological
+parameters cosmo. Both are assumed to be standardized (sigma_data ~ 1).
+"""
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from functools import partial
 
 
-class VESDE:
-    """Variance Exploding SDE.
-    
-    The forward SDE: dx = sigma(t) * dw
-    where sigma(t) = sigma_min * (sigma_max / sigma_min)^t
+class VESDE(nnx.Module):
+    r"""Variance-exploding noise schedule.
+
+    .. math:: \sigma(t) = \exp\bigl(\log\sigma_{\min} + t(\log\sigma_{\max} - \log\sigma_{\min})\bigr)
     """
-    def __init__(self, sigma_min: float = 0.01, sigma_max: float = 50.0):
+
+    def __init__(self, sigma_min: float = 2e-3, sigma_max: float = 80.0):
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
-    
+        self.log_sigma_min = jnp.log(sigma_min)
+        self.log_sigma_max = jnp.log(sigma_max)
+
     def sigma(self, t):
-        """Compute noise schedule at time t.
-        
-        Args:
-            t: Time value(s) in [0, 1]
-            
-        Returns:
-            Noise level sigma(t)
-        """
-        return self.sigma_min * (self.sigma_max / self.sigma_min) ** t
+        return jnp.exp(self.log_sigma_min + (self.log_sigma_max - self.log_sigma_min) * t)
+
+
+class Preconditioning:
+    r"""EDM (Karras et al. 2022) preconditioning coefficients.
+
+    .. math::
+        D_\theta(x; \sigma) = c_\text{skip}(\sigma)\, x
+            + c_\text{out}(\sigma)\, F_\theta\bigl(c_\text{in}(\sigma)\, x;\, c_\text{noise}(\sigma)\bigr)
+    """
+
+    def __init__(self, sigma_data: float = 1.0):
+        self.sigma_data = sigma_data
+
+    def c_skip(self, sigma):
+        return self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
+
+    def c_out(self, sigma):
+        return sigma * self.sigma_data / jnp.sqrt(sigma ** 2 + self.sigma_data ** 2)
+
+    def c_in(self, sigma):
+        return 1.0 / jnp.sqrt(sigma ** 2 + self.sigma_data ** 2)
+
+    def c_noise(self, sigma):
+        return 0.25 * jnp.log(sigma)
+
+    def lambda_weight(self, sigma):
+        return (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
+
 
 class Denoiser(nnx.Module):
+    r"""EDM-preconditioned joint denoiser for (field, cosmo).
+
+    Wraps a raw network ``F_\theta(x, c, c_noise, cond)`` that returns
+    ``(x_net, cosmo_net)`` and applies separate EDM preconditioning to each
+    modality (allowing independent ``sigma_data`` for the field and the
+    cosmological parameters if their post-normalization scales differ).
+    """
+
     def __init__(self, model: nnx.Module, cfg: dict):
-        """Initialize the Denoiser with a model and config.
-        
-        Args:
-            model: An NNX module that takes (x, cosmo, t, train) as inputs
-            cfg: Configuration dictionary with diffusion parameters
-        """
         self.model = model
         self.cfg = cfg
-        
-        # Sampling parameters
-        self.steps = cfg.get('sampling', {}).get('steps', 50)
-        self.method = cfg.get('sampling', {}).get('method', 'euler')  # 'euler', 'heun', or 'ddpm'
-        self.t_eps = cfg.get('sampling', {}).get('t_eps', 0.05)
-        self.noise_scale = cfg.get('sampling', {}).get('noise_scale', 1.0)
-        
-        # Initialize VESDE for variance exploding methods
-        sigma_min = cfg.get('diffusion', {}).get('sigma_min', 0.01)
-        sigma_max = cfg.get('diffusion', {}).get('sigma_max', 50.0)
-        self.sde = VESDE(sigma_min=sigma_min, sigma_max=sigma_max)
-    
-    def forward_process(self, x, cosmo, key):
-        """Forward corruption process using flow matching.
-        
-        Args:
-            x: Clean field data [batch, H, W, channels]
-            cosmo: Clean cosmological parameters [batch, n_params]
-            key: Random key
-            
-        Returns:
-            tuple: (xt, cosmot, t) - corrupted data and time
-        """
-        keys = jax.random.split(key, 3)
-        
-        # Sample time
-        if self.cfg['diffusion']['time_distribution'] == "logit":
-            mu = self.cfg['diffusion']['mu']
-            sigma = self.cfg['diffusion']['sigma']
-            s = (jax.random.normal(keys[0], shape=x.shape[:1]) + mu) * sigma
-            t = jax.nn.sigmoid(s)
-        elif self.cfg['diffusion']['time_distribution'] == "beta":
-            t = jax.random.beta(
-                keys[0], 
-                a=self.cfg['diffusion']['beta_a'], 
-                b=self.cfg['diffusion']['beta_b'], 
-                shape=x.shape[:1]
-            )
-        else:  # uniform
-            t = jax.random.uniform(keys[0], shape=x.shape[:1])
-        
-        # Flow matching interpolation: x_t = t*x + (1-t)*noise
-        xt = (t[..., None, None, None] * x + 
-              (1 - t[..., None, None, None]) * jax.random.normal(keys[1], shape=x.shape))
-        
-        cosmot = (t[..., None] * cosmo + 
-                  (1 - t[..., None]) * jax.random.normal(keys[2], shape=cosmo.shape))
-        
-        return xt, cosmot, t
-    
-    def __call__(self, x, cosmo, sigma_t, train=True):
-        """Forward pass through the denoiser model.
-        
-        Args:
-            x: Input field data (possibly corrupted)
-            cosmo: Input cosmological parameters (possibly corrupted)
-            t: Time values
-            train: Whether in training mode
-            
-        Returns:
-            tuple: (x_pred, cosmo_pred) - predicted clean data
-        """
 
-        # # Apply EDM preconditioning (sigma_data = 1.0 for standardized data)
-        # c_skip = 1.0 / (sigma_t**2 + 1.0)
-        # c_out = sigma_t / jnp.sqrt(sigma_t**2 + 1.0)
-        # c_in = 1.0 / jnp.sqrt(sigma_t**2 + 1.0)
-        # c_noise = 0.25 * jnp.log(sigma_t)
+        sigma_data_x = cfg["diffusion"].get("sigma_data_x", 1.0)
+        sigma_data_cosmo = cfg["diffusion"].get("sigma_data_cosmo", 1.0)
+        self.precond_x = Preconditioning(sigma_data=sigma_data_x)
+        self.precond_cosmo = Preconditioning(sigma_data=sigma_data_cosmo)
 
-        # # Forward with preconditioning
-        # x_net, cosmo_net = self.model(c_in * x, c_in * cosmo, c_noise, train)
-        
-        # # Apply output scaling and skip connection
-        # x_pred = c_skip * x + c_out * x_net
-        # cosmo_pred = c_skip * cosmo + c_out * cosmo_net
-        
-        # return x_pred, cosmo_pred
-        return self.model(x, cosmo, sigma_t, train)
-    
-    def loss_fn(self, x, cosmo, key, train=True, return_components=False):
-        """Compute denoising loss.
-        
-        Args:
-            x: Clean field data [batch, H, W, channels]
-            cosmo: Clean cosmological parameters [batch, n_params]
-            key: Random key
-            train: Whether in training mode
-            return_components: If True, return (total_loss, (loss_x, loss_cosmo))
-            
-        Returns:
-            Total loss, or (total_loss, (loss_x, loss_cosmo)) if return_components=True
-        """
-        keys = jax.random.split(key, 3)
-
-        # Sample time
-        if self.cfg['diffusion']['time_distribution'] == "logit":
-            mu = self.cfg['diffusion']['mu']
-            sigma = self.cfg['diffusion']['sigma']
-            s = (jax.random.normal(keys[0], shape=x.shape[:1]) + mu) * sigma
-            t = jax.nn.sigmoid(s)
-        elif self.cfg['diffusion']['time_distribution'] == "beta":
-            t = jax.random.beta(
-                keys[0], 
-                a=self.cfg['diffusion']['beta_a'], 
-                b=self.cfg['diffusion']['beta_b'], 
-                shape=x.shape[:1]
-            )
-        else:  # uniform
-            t = jax.random.uniform(keys[0], shape=x.shape[:1])
-        
-        # Forward diffusion
-        xt = (t[..., None, None, None] * x + 
-              (1 - t[..., None, None, None]) * jax.random.normal(keys[1], shape=x.shape))
-        cosmot = (t[..., None] * cosmo + 
-                  (1 - t[..., None]) * jax.random.normal(keys[2], shape=cosmo.shape))
-
-        # Predict clean data
-        model_vmap = jax.vmap(self.model, in_axes=(0, 0, 0, None))
-        x_pred, cosmo_pred = model_vmap(xt, cosmot, t, train)
-
-        # Compute losses
-        loss_x = jnp.mean((x - x_pred)**2, axis=(-1, -2, -3))
-        loss_cosmo = jnp.mean((cosmo - cosmo_pred)**2, axis=-1)
-        
-        # Apply loss weighting
-        if self.cfg["loss"]["type"] == "x-loss":
-            total_loss = jnp.mean(
-                loss_x + self.cfg['loss']['lambda_cosmo'] * loss_cosmo
-            )
-        elif self.cfg["loss"]["type"] == "v-loss":
-            vx = (x - xt) / jnp.clip((1 - t[..., None, None, None]), a_min=self.t_eps)
-            vx_pred = (x_pred - xt) / jnp.clip((1 - t[..., None, None, None]), a_min=self.t_eps)
-            
-            vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[..., None]), a_min=self.t_eps)
-            vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[..., None]), a_min=self.t_eps)
-            
-            total_loss = (jnp.mean((vx - vx_pred)**2, (-1, -2, -3)) + 
-                         self.cfg['loss']['lambda_cosmo'] * jnp.mean((vcosmo - vcosmo_pred)**2, (-1,)))
-            total_loss = total_loss.mean()
-        
-        if return_components:
-            return total_loss, (jnp.mean(loss_x), jnp.mean(loss_cosmo))
-        else:
-            return total_loss
-    
-    # ==================== Flow Matching Sampling Methods ====================
-    
-    def _forward_sample(self, z_x, z_cosmo, t):
-        """Compute velocity predictions for both x and cosmo.
-        
-        Args:
-            z_x: Noisy field data [batch, H, W, channels]
-            z_cosmo: Noisy cosmological parameters [batch, n_params]
-            t: Time values [batch,]
-            
-        Returns:
-            tuple: (v_x, v_cosmo) - velocity predictions
-        """
-        # Predict clean data
-        model_vmap = jax.vmap(self.model, in_axes=(0, 0, 0, None))
-        x_pred, cosmo_pred = model_vmap(z_x, z_cosmo, t, False)
-        
-        # Compute velocity: v = (x - z) / (1 - t)
-        t_broadcast_x = t[:, None, None, None]
-        t_broadcast_cosmo = t[:, None]
-        
-        v_x = (x_pred - z_x) / jnp.clip(1.0 - t_broadcast_x, a_min=self.t_eps)
-        v_cosmo = (cosmo_pred - z_cosmo) / jnp.clip(1.0 - t_broadcast_cosmo, a_min=self.t_eps)
-        
-        return v_x, v_cosmo
-    
-    def _euler_step(self, z_x, z_cosmo, t, t_next):
-        """Single Euler step.
-        
-        Args:
-            z_x: Current field state [batch, H, W, channels]
-            z_cosmo: Current cosmological parameters state [batch, n_params]
-            t: Current time [batch,]
-            t_next: Next time [batch,]
-            
-        Returns:
-            tuple: (z_x_next, z_cosmo_next) - next state
-        """
-        v_x, v_cosmo = self._forward_sample(z_x, z_cosmo, t)
-        
-        dt_x = (t_next - t)[:, None, None, None]
-        dt_cosmo = (t_next - t)[:, None]
-        
-        z_x_next = z_x + dt_x * v_x
-        z_cosmo_next = z_cosmo + dt_cosmo * v_cosmo
-        
-        return z_x_next, z_cosmo_next
-    
-    def _heun_step(self, z_x, z_cosmo, t, t_next):
-        """Single Heun step (2nd order Runge-Kutta).
-        
-        Args:
-            z_x: Current field state [batch, H, W, channels]
-            z_cosmo: Current cosmological parameters state [batch, n_params]
-            t: Current time [batch,]
-            t_next: Next time [batch,]
-            
-        Returns:
-            tuple: (z_x_next, z_cosmo_next) - next state
-        """
-        # First prediction at t
-        v_x_t, v_cosmo_t = self._forward_sample(z_x, z_cosmo, t)
-        
-        dt_x = (t_next - t)[:, None, None, None]
-        dt_cosmo = (t_next - t)[:, None]
-        
-        # Euler step to get tentative next state
-        z_x_euler = z_x + dt_x * v_x_t
-        z_cosmo_euler = z_cosmo + dt_cosmo * v_cosmo_t
-        
-        # Second prediction at t_next
-        v_x_t_next, v_cosmo_t_next = self._forward_sample(z_x_euler, z_cosmo_euler, t_next)
-        
-        # Average the two predictions
-        v_x = 0.5 * (v_x_t + v_x_t_next)
-        v_cosmo = 0.5 * (v_cosmo_t + v_cosmo_t_next)
-        
-        z_x_next = z_x + dt_x * v_x
-        z_cosmo_next = z_cosmo + dt_cosmo * v_cosmo
-        
-        return z_x_next, z_cosmo_next
-    
-    # ==================== Variance Exploding Sampling Methods ====================
-    
-    # @nnx.jit
-    def _ve_denoise_fn(self, xt, cosmot, sigma_t):
-        """Model wrapper for VE sampling that takes sigma instead of t.
-        
-        Args:
-            xt: Noisy field data [batch, H, W, channels]
-            cosmot: Noisy cosmological parameters [batch, n_params]
-            sigma_t: Noise level (can be scalar or array)
-            
-        Returns:
-            tuple: (x_pred, cosmo_pred) - predicted clean data
-        """
-        # Convert sigma to time t if needed
-        # For VE, we can pass sigma directly or convert to t space
-        # Assuming model expects t in [0, 1], we can use sigma as a proxy
-        # or define a mapping. Here we'll assume the model can handle it.
-        
-        # If sigma_t is scalar, broadcast to batch
-        #if jnp.ndim(sigma_t) == 0:
-        #    sigma_t = jnp.full((xt.shape[0],), sigma_t)
-        
-        model_vmap = jax.vmap(self.__call__, in_axes=(0, 0, 0, None))
-        x_pred, cosmo_pred = model_vmap(xt, cosmot, sigma_t, False)
-        
-        return x_pred, cosmo_pred
-    
-    def _ddpm_step(self, xt, cosmot, t, s, key):
-        """Single DDPM step for variance exploding SDE.
-        
-        Uses the reverse SDE:
-        x_s = x_t - tau * (x_t - f(x_t)) + sigma_s * sqrt(tau) * epsilon
-        where tau = 1 - (sigma_s / sigma_t)^2
-        
-        Args:
-            xt: Current field state [batch, H, W, channels]
-            cosmot: Current cosmological parameters state [batch, n_params]
-            t: Current time [batch,] or scalar
-            s: Next time [batch,] or scalar
-            key: Random key for noise
-            
-        Returns:
-            tuple: (x_next, cosmo_next) - next state
-        """
-        keys = jax.random.split(key, 2)
-        
-        # Get noise levels
-        sigma_s = self.sde.sigma(s)
-        sigma_t = self.sde.sigma(t)
-
-        # Compute tau
-        tau = 1 - (sigma_s / sigma_t) ** 2
-        
-        # Get denoised predictions
-        x_pred, cosmo_pred = self._ve_denoise_fn(xt, cosmot, sigma_t)
-        
-        # Generate noise
-        eps_x = jax.random.normal(keys[0], xt.shape)
-        eps_cosmo = jax.random.normal(keys[1], cosmot.shape)
-        
-        # Broadcast tau if scalar
-        if jnp.ndim(tau) == 0:
-            tau_x = tau
-            tau_cosmo = tau
-            sigma_s_x = sigma_s
-            sigma_s_cosmo = sigma_s
-        else:
-            tau_x = tau[:, None, None, None]
-            tau_cosmo = tau[:, None]
-            sigma_s_x = sigma_s[:, None, None, None]
-            sigma_s_cosmo = sigma_s[:, None]
-        
-        # DDPM update
-        x_next = xt - tau_x * (xt - x_pred) + sigma_s_x * jnp.sqrt(tau_x) * eps_x
-        cosmo_next = cosmot - tau_cosmo * (cosmot - cosmo_pred) + sigma_s_cosmo * jnp.sqrt(tau_cosmo) * eps_cosmo
-        
-        return x_next, cosmo_next
-    
-    def generate_ve(self, key, batch_size=1, t_start=1.0):
-        """Generate samples using variance exploding DDPM sampling.
-        
-        Args:
-            key: Random key
-            batch_size: Number of samples to generate
-            t_start: Starting time (default 1.0, maximum noise)
-            
-        Returns:
-            tuple: (x_generated, cosmo_generated) - generated samples
-        """
-        # Determine shapes
-        x_shape = (
-            self.cfg.get('data', {}).get('image_size', 128),
-            self.cfg.get('data', {}).get('image_size', 128),
-            self.cfg.get('data', {}).get('n_channels', 5)
+        self.sde = VESDE(
+            sigma_min=cfg["diffusion"].get("sigma_min", 2e-3),
+            sigma_max=cfg["diffusion"].get("sigma_max", 80.0),
         )
-        cosmo_dim = 6
-        
-        # Initialize from noise scaled by sigma(t_start)
-        keys = jax.random.split(key, 2 + self.steps)
-        sigma_start = self.sde.sigma(t_start)
-        
-        xt = sigma_start * jax.random.normal(keys[0], shape=(batch_size, 128, 128, 5))
-        cosmot = sigma_start * jax.random.normal(keys[1], shape=(batch_size, cosmo_dim))
-        
-        # Create timesteps from t_start to dt (near 0)
-        dt = t_start / self.steps
-        timesteps = jnp.linspace(t_start, dt, self.steps)
-        
-        # Reverse process: iterate from high noise to low noise
-        for i in range(self.steps - 1):
-            t = jnp.full((batch_size,), timesteps[i])
-            s = jnp.full((batch_size,), timesteps[i + 1])
-            xt, cosmot = self._ddpm_step(xt, cosmot, t, s, keys[2 + i])
-        
-        # Final denoising step at t=dt
-        x_final, cosmo_final = self._ve_denoise_fn(xt, cosmot, 0.*jnp.ones((batch_size,)))
-        #return xt, cosmot
-        return x_final, cosmo_final
-    
-    def generate(self, key, batch_size=1, x_shape=None, cosmo_shape=None, use_ve=False):
-        """Generate joint samples of x and cosmo.
-        
-        Args:
-            key: Random key for initialization
-            batch_size: Number of samples to generate
-            x_shape: Shape of field data (H, W, channels). If None, inferred from config
-            cosmo_shape: Shape of cosmo parameters. If None, uses default (6,)
-            use_ve: If True, use variance exploding DDPM sampler. Otherwise use flow matching.
-            
-        Returns:
-            tuple: (x_generated, cosmo_generated) - generated samples
-        """
-        if use_ve:
-            return self.generate_ve(key, batch_size)
-        
-        # Original flow matching generation
-        # Determine field shape
-        if x_shape is None:
-            x_shape = (
-                self.cfg.get('data', {}).get('image_size', 128),
-                self.cfg.get('data', {}).get('image_size', 128),
-                self.cfg.get('data', {}).get('n_channels', 5)
-            )
-        
-        # Get cosmological parameter dimension
-        cosmo_dim = 6
-        
-        # Initialize from pure noise (t=0)
-        keys = jax.random.split(key, 2)
-        z_x = self.noise_scale * jax.random.normal(keys[0], shape=(batch_size, 128, 128, 5))
-        z_cosmo = self.noise_scale * jax.random.normal(keys[1], shape=(batch_size, cosmo_dim))
-        
-        # Create timesteps from 0 to 1
-        timesteps = jnp.linspace(0.0, 1.0, self.steps + 1)
-        
-        # Select stepper
-        if self.method == "euler":
-            stepper = self._euler_step
-        elif self.method == "heun":
-            stepper = self._heun_step
+
+    def __call__(self, xt, cosmot, sigma, cond=None, train: bool = False, key=None):
+        c_skip_x = self.precond_x.c_skip(sigma)
+        c_out_x = self.precond_x.c_out(sigma)
+        c_in_x = self.precond_x.c_in(sigma)
+
+        c_skip_c = self.precond_cosmo.c_skip(sigma)
+        c_out_c = self.precond_cosmo.c_out(sigma)
+        c_in_c = self.precond_cosmo.c_in(sigma)
+
+        c_noise = self.precond_x.c_noise(sigma)
+
+        x_net, cosmo_net = self.model(
+            c_in_x * xt, c_in_c * cosmot, c_noise,
+            cond=cond, train=train, key=key,
+        )
+
+        x_pred = c_skip_x * xt + c_out_x * x_net
+        cosmo_pred = c_skip_c * cosmot + c_out_c * cosmo_net
+        return x_pred, cosmo_pred
+
+    def x_pred(self, xt, cosmot, sigma, cond=None, train: bool = False, key=None):
+        return self(xt, cosmot, sigma, cond=cond, train=train, key=key)
+
+    def forward_diffusion(self, x, cosmo, sigma, key):
+        """Add VE noise: xt = x + sigma * z, cosmot = cosmo + sigma * z."""
+        key_x, key_c = jax.random.split(key, 2)
+        noise_x = jax.random.normal(key_x, shape=x.shape)
+        noise_cosmo = jax.random.normal(key_c, shape=cosmo.shape)
+        xt = x + sigma * noise_x
+        cosmot = cosmo + sigma * noise_cosmo
+        return xt, cosmot
+
+
+class DenoiserLoss(nnx.Module):
+    r"""EDM denoiser-matching loss with log-normal :math:`\sigma` sampling.
+
+    Per-sample :math:`\sigma \sim \exp(\mathcal{N}(P_\text{mean}, P_\text{std}^2))`.
+    The loss on the denoiser output is weighted by ``lambda_weight`` so that the
+    effective loss on the raw network is uniform across noise levels.
+    """
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.P_mean = cfg["diffusion"].get("P_mean", -1.2)
+        self.P_std = cfg["diffusion"].get("P_std", 1.2)
+        self.sigma_data_x = cfg["diffusion"].get("sigma_data_x", 1.0)
+        self.sigma_data_cosmo = cfg["diffusion"].get("sigma_data_cosmo", 1.0)
+
+    def __call__(self, model, x, cosmo, key, train: bool = False, cond=None):
+        key_sigma, key_nx, key_nc, key_dropout = jax.random.split(key, 4)
+
+        # log-normal sigma per sample
+        log_sigma = self.P_mean + self.P_std * jax.random.normal(key_sigma, shape=x.shape[:1])
+        sigma = jnp.exp(log_sigma)
+
+        sigma_b_x = sigma[:, None, None, None]
+        sigma_b_c = sigma[:, None]
+
+        noise_x = jax.random.normal(key_nx, shape=x.shape)
+        noise_cosmo = jax.random.normal(key_nc, shape=cosmo.shape)
+        xt = x + sigma_b_x * noise_x
+        cosmot = cosmo + sigma_b_c * noise_cosmo
+
+        batch_size = x.shape[0]
+        if train:
+            dropout_keys = jax.random.split(key_dropout, batch_size)
         else:
-            raise NotImplementedError(f"Method {self.method} not implemented")
-        
-        # ODE integration from t=0 (noise) to t=1 (data)
-        for i in range(self.steps - 1):
-            t = jnp.full((batch_size,), timesteps[i])
-            t_next = jnp.full((batch_size,), timesteps[i + 1])
-            z_x, z_cosmo = stepper(z_x, z_cosmo, t, t_next)
-        
-        # Last step with Euler
-        t = jnp.full((batch_size,), timesteps[-2])
-        t_next = jnp.full((batch_size,), timesteps[-1])
-        z_x, z_cosmo = self._euler_step(z_x, z_cosmo, t, t_next)
-        
-        return z_x, z_cosmo
+            dropout_keys = jnp.zeros((batch_size, 2), dtype=jnp.uint32)
 
-class DDPM(nnx.Module):
-    def __init__(self, denoiser: nnx.Module, vesde: VESDE):
-        """Initialize DDPM sampler with denoiser and VESDE.
-        
-        Args:
-            denoiser: Denoiser model
-            vesde: VESDE instance
-            cfg: Configuration dictionary
-        """
-        self.denoiser = denoiser
-        self.sde = vesde
-        
-    def _ddpm_step(self, xt, cosmot, t, s, key):
-        sigma_s, sigma_t = self.sde.sigma(s), self.sde.sigma(t)
-        tau = 1 - (sigma_s / sigma_t) ** 2
-        eps_x = jax.random.normal(key, xt.shape)
-        eps_cosmo = jax.random.normal(key, cosmot.shape)
-        
-        x_pred, cosmo_pred = self.denoiser(xt, cosmot, sigma_t)
-        
-        x_ = xt - tau * (xt - x_pred) + sigma_s * jnp.sqrt(tau) * eps_x
-        cosmo_ = cosmot - tau * (cosmot - cosmo_pred) + sigma_s * jnp.sqrt(tau) * eps_cosmo
-        
-        return x_, cosmo_
+        x_pred, cosmo_pred = jax.vmap(
+            model.x_pred, in_axes=(0, 0, 0, 0, None, 0)
+        )(xt, cosmot, sigma, cond, train, dropout_keys)
 
-    # @nnx.jit
-    def generate(self, key):
-        t = 1.0
-        steps = 64
-        dt = jnp.asarray(t / steps)
-        time = jnp.linspace(t, dt, steps)
+        # EDM weight: lambda(sigma) = (sigma^2 + sigma_data^2) / (sigma * sigma_data)^2
+        lambda_x = (sigma ** 2 + self.sigma_data_x ** 2) / (sigma * self.sigma_data_x) ** 2
+        lambda_c = (sigma ** 2 + self.sigma_data_cosmo ** 2) / (sigma * self.sigma_data_cosmo) ** 2
 
-        key_time, key_x, key_cosmo = jax.random.split(key, 3)
+        # Per-modality MSE (for logging — comparable across runs)
+        loss_x = (lambda_x * jnp.mean((x_pred - x) ** 2, axis=(-1, -2, -3))).mean()
+        loss_cosmo = (lambda_c * jnp.mean((cosmo_pred - cosmo) ** 2, axis=-1)).mean()
 
-        xt = jax.random.normal(key_x, (128,128,5)) * self.sde.sigma(1.0)
-        cosmot = jax.random.normal(key_cosmo, (6)) * self.sde.sigma(1.0)
+        # Total loss: sum of squared errors over ALL elements (field + cosmo),
+        # normalized by the total element count. Matches FlowLoss(mixture=False)
+        # so cosmo (6 dims) and field (128*128*5 dims) get equal per-element
+        # weight rather than equal per-modality weight.
+        n_field = x.shape[-1] * x.shape[-2] * x.shape[-3]
+        n_cosmo = cosmo.shape[-1]
+        se_x = lambda_x * jnp.sum((x_pred - x) ** 2, axis=(-1, -2, -3))
+        se_c = lambda_c * jnp.sum((cosmo_pred - cosmo) ** 2, axis=-1)
+        total_loss = ((se_x + se_c) / (n_field + n_cosmo)).mean()
 
-        keys = jax.random.split(key_time, steps)
-        
-        def f(in_t, t_key):
-            xt, cosmot = in_t
-            t, key = t_key
-            return self._ddpm_step(xt, cosmot, t, t - dt, key), None
+        return total_loss, (loss_x, loss_cosmo)
 
-        (x0, cosmo0), _ = jax.lax.scan(f, (xt, cosmot), (time, keys))
-        
-        return self.denoiser(x0, cosmo0, self.sde.sigma(0.0))
+
+def karras_sigma_schedule(num_steps: int, sigma_min: float, sigma_max: float, rho: float = 7.0):
+    r"""Karras :math:`\rho`-discretized noise schedule (Eq. 5 in EDM).
+
+    Returns an array of length ``num_steps + 1`` with ``sigmas[-1] = 0``.
+    """
+    i = jnp.arange(num_steps, dtype=jnp.float32)
+    sigmas = (
+        sigma_max ** (1.0 / rho)
+        + i / (num_steps - 1) * (sigma_min ** (1.0 / rho) - sigma_max ** (1.0 / rho))
+    ) ** rho
+    return jnp.concatenate([sigmas, jnp.zeros(1, dtype=sigmas.dtype)])
+
+
+class HeunSampler(nnx.Module):
+    r"""Deterministic EDM Heun sampler (Algorithm 1 of Karras et al. 2022).
+
+    Operates on a single (x, cosmo) sample; vmap to batch.
+    Inputs ``x0`` and ``cosmo0`` are unit-Gaussian latents; they are scaled by
+    ``sigma_max`` internally to initialize the reverse process.
+    """
+
+    def __init__(
+        self,
+        model: nnx.Module,
+        num_steps: int = 18,
+        sigma_min: float = 2e-3,
+        sigma_max: float = 80.0,
+        rho: float = 7.0,
+    ):
+        self.model = model
+        self.num_steps = num_steps
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.rho = rho
+        self.sigmas = karras_sigma_schedule(num_steps, sigma_min, sigma_max, rho)
+
+    def _denoise(self, xt, cosmot, sigma, cond):
+        return self.model.x_pred(xt, cosmot, sigma, cond=cond, train=False)
+
+    def __call__(self, x0, cosmo0, cond=None, key=None):
+        sigmas = self.sigmas
+
+        xt = x0 * sigmas[0]
+        cosmot = cosmo0 * sigmas[0]
+
+        def heun_step(carry, idx):
+            xt, cosmot = carry
+            sigma = sigmas[idx]
+            sigma_next = sigmas[idx + 1]
+            dt = sigma_next - sigma
+
+            x_pred, cosmo_pred = self._denoise(xt, cosmot, sigma, cond)
+            d_x = (xt - x_pred) / sigma
+            d_c = (cosmot - cosmo_pred) / sigma
+
+            xt_e = xt + dt * d_x
+            cosmot_e = cosmot + dt * d_c
+
+            x_pred2, cosmo_pred2 = self._denoise(xt_e, cosmot_e, sigma_next, cond)
+            d_x2 = (xt_e - x_pred2) / sigma_next
+            d_c2 = (cosmot_e - cosmo_pred2) / sigma_next
+
+            xt_n = xt + dt * 0.5 * (d_x + d_x2)
+            cosmot_n = cosmot + dt * 0.5 * (d_c + d_c2)
+            return (xt_n, cosmot_n), None
+
+        # Heun steps from sigma_0 down to sigma_{N-1} (last with sigma_next > 0)
+        (xt, cosmot), _ = jax.lax.scan(
+            heun_step, (xt, cosmot), jnp.arange(self.num_steps - 1)
+        )
+
+        # Final Euler step into sigma = 0 (Heun is undefined there)
+        sigma = sigmas[-2]
+        sigma_next = sigmas[-1]
+        x_pred, cosmo_pred = self._denoise(xt, cosmot, sigma, cond)
+        d_x = (xt - x_pred) / sigma
+        d_c = (cosmot - cosmo_pred) / sigma
+        xt = xt + (sigma_next - sigma) * d_x
+        cosmot = cosmot + (sigma_next - sigma) * d_c
+        return xt, cosmot
+
+
+class DDPMSampler(nnx.Module):
+    r"""Stochastic DDPM-style sampler for the VE reverse SDE.
+
+    .. math::
+        x_s = x_t - \tau (x_t - D(x_t;\sigma_t)) + \sigma_s \sqrt{\tau}\, \epsilon,
+        \quad \tau = 1 - (\sigma_s / \sigma_t)^2
+    """
+
+    def __init__(
+        self,
+        model: nnx.Module,
+        num_steps: int = 64,
+        sigma_min: float = 2e-3,
+        sigma_max: float = 80.0,
+        rho: float = 7.0,
+    ):
+        self.model = model
+        self.num_steps = num_steps
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.rho = rho
+        self.sigmas = karras_sigma_schedule(num_steps, sigma_min, sigma_max, rho)
+
+    def _denoise(self, xt, cosmot, sigma, cond):
+        return self.model.x_pred(xt, cosmot, sigma, cond=cond, train=False)
+
+    def __call__(self, x0, cosmo0, cond=None, key=None):
+        sigmas = self.sigmas
+        keys = jax.random.split(key, self.num_steps)
+
+        xt = x0 * sigmas[0]
+        cosmot = cosmo0 * sigmas[0]
+
+        def ddpm_step(carry, t_key):
+            xt, cosmot = carry
+            idx, k = t_key
+            sigma_t = sigmas[idx]
+            sigma_s = sigmas[idx + 1]
+            tau = 1.0 - (sigma_s / sigma_t) ** 2
+
+            x_pred, cosmo_pred = self._denoise(xt, cosmot, sigma_t, cond)
+
+            k_x, k_c = jax.random.split(k, 2)
+            eps_x = jax.random.normal(k_x, shape=xt.shape)
+            eps_c = jax.random.normal(k_c, shape=cosmot.shape)
+
+            xt_n = xt - tau * (xt - x_pred) + sigma_s * jnp.sqrt(tau) * eps_x
+            cosmot_n = cosmot - tau * (cosmot - cosmo_pred) + sigma_s * jnp.sqrt(tau) * eps_c
+            return (xt_n, cosmot_n), None
+
+        # Run num_steps - 1 stochastic steps, then one final clean denoise at sigma=0
+        (xt, cosmot), _ = jax.lax.scan(
+            ddpm_step, (xt, cosmot), (jnp.arange(self.num_steps - 1), keys[:-1])
+        )
+
+        # Last step: denoiser at sigma_min (or smallest non-zero sigma)
+        sigma_final = sigmas[-2]
+        x_pred, cosmo_pred = self._denoise(xt, cosmot, sigma_final, cond)
+        return x_pred, cosmo_pred

@@ -1,0 +1,81 @@
+# Stage-2 "Level A — observation-only θ inference".
+#
+# Same freeze strategy as hybrid_stage2_p8_continue.yaml (medium: trainable =
+# cosmo_embedder, cosmo_head, qkv_theta), but with an attention mask that
+# blocks θ→κ scores so θ queries only see {θ, γ}. κ→θ is kept (correlation is
+# carried by κ's score function), and the joint loss regularises any drift in
+# qkv_theta's V_θ that the κ-side reads.
+#
+# Resumes from by4dv8sg's last EMA checkpoint, same as the continue config.
+
+model:
+  name: "JADE_B_16"
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: true
+  cond_channels: 5
+  patch_size: 8
+  cond_patch_size: 8
+  num_cosmo_tokens: 16
+  cond_start: 0
+  attn_drop: 0.0
+  proj_drop: 0.0
+  split_qkv: true
+  mask_theta_to_field: true   # ← Level A: block θ queries from attending to κ keys
+
+stage2:
+  strategy: "medium"
+  params_dir: "/u/bremy/repos/jade/experiments/wandb/run-20260504_100148-by4dv8sg/files/checkpoints"
+  params_name: "JADE_B_16_ema_latest"
+  verify_freeze: true
+
+training:
+  num_epochs: 600
+  batch_size: 100
+  seed: 42
+  use_mixed_precision: true
+  precision: "bfloat16"
+
+optimizer:
+  type: "adamw"
+  learning_rate: 5e-5
+  weight_decay: 0.
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+
+  use_schedule: false
+
+ema:
+  use_ema: true
+  decay: 0.999
+
+diffusion:
+  model: "linear"
+  time_distribution: "logit"
+  mu: -0.8
+  sigma: 0.8
+  t_eps: 0.05
+
+data:
+  dataset_path: "sbi_lens_full"
+  val_split: 0.05
+  shuffle_seed: 42
+  num_workers: 8
+
+checkpoint:
+  dir: "checkpoints"
+  save_every_n_epochs: 1
+  keep_best: true
+
+logging:
+  project: "jade"
+  entity: "b-remy"
+  log_every_n_steps: 10
+  visualize_every_n_epochs: 10
+
+loss:
+  type: "v-loss"
+  mixture: false
+  lambda_cosmo: 10.
+  SCALE_COSMO: 1

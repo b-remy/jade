@@ -1,0 +1,90 @@
+# Model configuration (same architecture as hybrid)
+model:
+  name: "JADE_B_16"
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: true
+  cond_channels: 5
+  patch_size: 8
+  cond_patch_size: 16
+  num_cosmo_tokens: 16
+  cond_start: 0
+  attn_drop: 0.3
+  proj_drop: 0.3
+
+# Training configuration
+training:
+  num_epochs: 1200
+  batch_size: 200
+  seed: 42
+  use_mixed_precision: true
+  precision: "bfloat16"
+
+# Distributed training configuration
+distributed:
+  use_sharding: true
+
+# Optimizer configuration
+optimizer:
+  type: "adamw"
+  learning_rate: 1e-5
+  weight_decay: 0.
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+
+  use_schedule: true
+  schedule:
+    init_value: 5e-3
+    end_value: 1e-4
+
+# EMA configuration
+ema:
+  use_ema: true
+  decay: 0.9996
+
+# EDM diffusion configuration (Karras et al. 2022)
+diffusion:
+  # log-normal sigma sampler used during training
+  P_mean: -1.2
+  P_std: 1.2
+  # sigma_data ~ 1 because both x and cosmo are standardized
+  sigma_data_x: 1.0
+  sigma_data_cosmo: 1.0
+  # sampling-time noise schedule bounds
+  # sigma_max kept modest (10) since kappa maps lack high-intensity pixels
+  sigma_min: 2e-3
+  sigma_max: 10.0
+
+# Sampler configuration (Heun, Karras rho-schedule)
+sampling:
+  num_steps: 18
+  rho: 7.0
+
+# Data configuration
+data:
+  dataset_path: "sbi_lens_full"
+  val_split: 0.05
+  shuffle_seed: 42
+  num_workers: 8
+
+# Checkpoint configuration
+checkpoint:
+  dir: "checkpoints"
+  save_every_n_epochs: 1
+  keep_best: true
+
+# Logging configuration
+logging:
+  project: "jade"
+  entity: "b-remy"
+  log_every_n_steps: 10
+  visualize_every_n_epochs: 10
+
+# Loss configuration
+loss:
+  # No cross-modality scalar weight: loss = sum SE over all elements (field + cosmo)
+  # divided by total element count — every element gets equal weight.
+  SCALE_COSMO: 1
+
+start_from_checkpoint: false

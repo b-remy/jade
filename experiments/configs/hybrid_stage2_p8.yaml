@@ -1,0 +1,83 @@
+# Stage 2 for run e06v6sdj (cond_patch_size=8, batch_size=128).
+# Same Strategy A freeze as hybrid_stage2.yaml; only the architecture/data
+# fields tied to the stage-1 checkpoint differ.
+
+model:
+  name: "JADE_B_16"
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: true
+  cond_channels: 5
+  patch_size: 8
+  cond_patch_size: 8
+  num_cosmo_tokens: 16
+  cond_start: 0
+  attn_drop: 0.0    # disable dropout in stage 2 (fine-tune)
+  proj_drop: 0.0
+  split_qkv: true   # ← stage-2 architecture flag
+
+# Stage 2 specific
+stage2:
+  strategy: "medium"   # "medium" (Strategy A) or "loose" (Strategy B, not yet wired)
+  # Stage-1 checkpoint: run e06v6sdj (cond_patch_size=8, num_cosmo_tokens=16,
+  # cond_start=0). Trained with batch_size=128.
+  params_dir: "/u/bremy/repos/jade/experiments/wandb/run-20260414_232810-e06v6sdj/files/checkpoints"
+  params_name: "JADE_B_16_ema_latest"
+  verify_freeze: true
+
+training:
+  num_epochs: 600
+  batch_size: 100
+  seed: 42
+  use_mixed_precision: true
+  precision: "bfloat16"
+
+# Lower LR than stage 1, no warmup. Spec: peak 5e-4 → 5e-5.
+optimizer:
+  type: "adamw"
+  learning_rate: 1e-5
+  weight_decay: 0.
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+
+  use_schedule: true
+  schedule:
+    init_value: 5e-4
+    end_value: 5e-5
+
+# Restart EMA from stage-1 EMA weights, with the spec's decay.
+ema:
+  use_ema: true
+  decay: 0.999
+
+diffusion:
+  model: "linear"
+  time_distribution: "logit"
+  mu: -0.8
+  sigma: 0.8
+  t_eps: 0.05
+
+data:
+  dataset_path: "sbi_lens_full"
+  val_split: 0.05
+  shuffle_seed: 42
+  num_workers: 8
+
+checkpoint:
+  dir: "checkpoints"
+  save_every_n_epochs: 1
+  keep_best: true
+
+logging:
+  project: "jade"
+  entity: "b-remy"
+  log_every_n_steps: 10
+  visualize_every_n_epochs: 10
+
+# Same loss as stage 1; we only change which params receive updates.
+loss:
+  type: "v-loss"
+  mixture: false
+  lambda_cosmo: 10.
+  SCALE_COSMO: 1

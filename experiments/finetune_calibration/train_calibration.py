@@ -1,0 +1,892 @@
+#!/usr/bin/env python
+
+import os
+import multiprocessing
+# DataLoader workers (spawn/forkserver) re-import this module; keep them off GPU
+# so they don't each try to grab a CUDA context and OOM.
+if multiprocessing.current_process().name != "MainProcess":
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+import argparse
+import yaml
+import gc
+import pickle
+
+import jax
+import jax.numpy as jnp
+
+from flax import nnx
+import optax
+
+import dm_pix as pix
+
+import numpy as np
+
+from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
+from jax.experimental import mesh_utils
+
+from datasets import load_from_disk
+from functools import partial
+
+import torch
+from torch.utils.data import DataLoader
+
+import matplotlib.pyplot as plt
+import wandb
+from tqdm import tqdm
+
+from getdist import MCSamples, plots
+
+# Calibration (TARP-CvM) regularizer — lives alongside this script.
+from tarp_loss import tarp_cvm_loss, make_adjoint
+
+# from jade.nn_one_token import JADE_B_16
+from jade.nn_patch import JADE_B_16_mixed
+from jade.nn_hybrid import JADE_B_16
+from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD, sigma_lsst
+from jade.flow import Denoiser, FlowLoss
+from jade.sampling import EulerSampler, HeunSampler 
+from jade.utils import dump_model, load_model, denormalize_fields, denormalize_cosmo, plot_denoiser, plot_samples
+
+@jax.jit
+@jax.vmap
+def augment(x, key):
+    """
+    x: image [w, h, c]
+    key: random key
+    """
+    keys = jax.random.split(key, 2)
+    x = pix.random_flip_left_right(keys[0], x)
+    x = pix.random_flip_up_down(keys[1], x)
+    return x
+
+
+def hf_collate(batch):
+    """Collate HF examples (format='numpy') into a dict of stacked numpy arrays.
+
+    Only the keys needed for training are kept to avoid loading unused columns.
+    """
+    return {
+        "map": np.stack([b["map"] for b in batch]),
+        "theta": np.stack([b["theta"] for b in batch]),
+    }
+
+
+@jax.jit
+def normalize_batch(batch):
+    """Normalize a batch from the dataset."""
+    theta_norm = (batch['theta'] - THETA_MEAN) / THETA_STD
+    
+    field_mean = FIELD_MEAN.reshape(1, 1, 1, -1)
+    field_std = FIELD_STD.reshape(1, 1, 1, -1)
+    map_norm = (batch['map'] - field_mean) / field_std
+    
+    return {'map': map_norm, 'theta': theta_norm}
+
+@jax.jit
+def make_cond(x, key):
+    x = x * FIELD_STD.reshape(1, 1, 1, -1) + FIELD_MEAN.reshape(1, 1, 1, -1)
+    cond = x + sigma_lsst.reshape((1,1,1,-1)) * jax.random.normal(key, shape=x.shape)
+    cond = (cond - FIELD_MEAN.reshape(1, 1, 1, -1)) / FIELD_STD.reshape(1, 1, 1, -1)
+    return cond
+
+def plot_corner(theta_post, mcmc_samples, theta_truth):
+    """Triangle plot comparing diffusion posterior to reference MCMC samples."""
+    names = [r"$\Omega_c$", r"$\Omega_b$", r"$\sigma_8$", r"$h_0$", r"$n_s$", r"$w_0$"]
+    s_post = MCSamples(samples=np.asarray(theta_post), names=names, label="Diffusion")
+    s_mcmc = MCSamples(samples=np.asarray(mcmc_samples), names=names, label="MCMC")
+
+    g = plots.get_subplot_plotter()
+    g.settings.axes_fontsize = 14
+    g.settings.axes_labelsize = 16
+    g.settings.legend_fontsize = 16
+    g.triangle_plot(
+        [s_post, s_mcmc],
+        names,
+        markers=np.asarray(theta_truth),
+        marker_args={"lw": 1},
+        filled=[True, False],
+        contour_colors=["#d06e99ff", "black"],
+        contour_ls=["-", "--"],
+        contour_lws=[2., 2.],
+    )
+    return plt.gcf()
+
+
+def create_optimizer(cfg, total_steps):
+    """Create optimizer with optional learning rate schedule"""
+    
+    if cfg['optimizer']['use_schedule']:
+        schedule = optax.linear_schedule(
+            init_value=cfg['optimizer']['schedule']['init_value'],
+            end_value=cfg['optimizer']['schedule']['end_value'],
+            transition_steps=total_steps,
+        )
+        learning_rate = schedule
+    else:
+        learning_rate = cfg['optimizer']['learning_rate']
+    
+    opt = optax.chain(
+        optax.clip_by_global_norm(cfg['optimizer']['grad_clip_norm']),
+        optax.adamw(
+            learning_rate=learning_rate,
+            b1=cfg['optimizer']['beta1'],
+            b2=cfg['optimizer']['beta2'],
+            weight_decay=cfg['optimizer']['weight_decay']
+        ),
+    )
+    
+    return opt
+
+
+def setup_mesh_and_sharding(num_devices):
+    """
+    Setup device mesh and sharding specifications for FSDP.
+    
+    Args:
+        num_devices: Number of devices to use (e.g., 2 for 2 GPUs)
+    
+    Returns:
+        mesh: JAX Mesh object
+        sharding_strategy: Dictionary of sharding specs for different model components
+    """
+    # Create a 1D mesh along the 'fsdp' axis
+    devices = mesh_utils.create_device_mesh((num_devices,))
+    mesh = Mesh(devices, axis_names=('fsdp',))
+    
+    print(f"Created mesh with {num_devices} devices: {mesh}")
+    print(f"Device IDs: {mesh.devices}")
+    
+    # Define sharding strategy
+    # For FSDP: shard parameters across 'fsdp' axis
+    # Optimizer state will automatically match parameter sharding
+    sharding_strategy = {
+        'params': P('fsdp'),           # Shard parameters across devices
+        'batch': P(None),              # Replicate batch (or use P('fsdp') for data parallelism)
+    }
+    
+    return mesh, sharding_strategy
+
+
+def shard_model_state(state, mesh, spec):
+    """
+    Shard model state according to PartitionSpec.
+    Shards large parameters along the first divisible dimension.
+    Small parameters (biases, scalars, etc.) are replicated.
+    
+    Args:
+        state: Model state (params or optimizer state)
+        mesh: JAX Mesh
+        spec: PartitionSpec (e.g., P('fsdp'))
+    
+    Returns:
+        Sharded state
+    """
+    num_devices = mesh.shape['fsdp']
+    
+    def create_sharding(x):
+        """Create sharding spec based on parameter size and shape."""
+        # For scalars or empty arrays, replicate
+        if x.ndim == 0 or x.size == 0:
+            return NamedSharding(mesh, P())
+        
+        # For 1D arrays (biases, norms), check if divisible
+        if x.ndim == 1:
+            if x.shape[0] % num_devices == 0:
+                return NamedSharding(mesh, spec)
+            else:
+                return NamedSharding(mesh, P())
+        
+        # For 2D arrays (linear layers), shard along first dim if possible
+        if x.ndim == 2:
+            if x.shape[0] % num_devices == 0:
+                return NamedSharding(mesh, spec)  # P('fsdp',)
+            elif x.shape[1] % num_devices == 0:
+                # Shard along second dimension instead
+                return NamedSharding(mesh, P(None, 'fsdp'))
+            else:
+                return NamedSharding(mesh, P())
+        
+        # For 4D arrays (conv kernels: [kH, kW, in_c, out_c])
+        # Common shapes: (1, 1, in_c, out_c) or (k, k, in_c, out_c)
+        if x.ndim == 4:
+            # Try to shard along output channels (last dim)
+            if x.shape[-1] % num_devices == 0:
+                return NamedSharding(mesh, P(None, None, None, 'fsdp'))
+            # Try to shard along input channels (3rd dim)
+            elif x.shape[-2] % num_devices == 0:
+                return NamedSharding(mesh, P(None, None, 'fsdp', None))
+            else:
+                return NamedSharding(mesh, P())
+        
+        # For higher-dim arrays, try to find any divisible dimension
+        for i, dim in enumerate(x.shape):
+            if dim % num_devices == 0:
+                sharding_spec = [None] * x.ndim
+                sharding_spec[i] = 'fsdp'
+                return NamedSharding(mesh, P(*sharding_spec))
+        
+        # If no dimension is divisible, replicate
+        return NamedSharding(mesh, P())
+    
+    # Apply sharding to all leaves
+    shardings = jax.tree.map(create_sharding, state)
+    
+    # Use jax.device_put to actually shard the arrays
+    sharded_state = jax.tree.map(
+        lambda x, s: jax.device_put(x, s),
+        state,
+        shardings
+    )
+    
+    return sharded_state
+
+def train(cfg):
+    """Main training function with FSDP support"""
+    
+    # ========================================================================
+    # MULTI-GPU SETUP
+    # ========================================================================
+    num_devices = jax.device_count()
+    print(f"\n{'='*60}")
+    print(f"Multi-GPU Training Setup")
+    print(f"{'='*60}")
+    print(f"Available devices: {num_devices}")
+    print(f"Device type: {jax.devices()[0].platform}")
+    
+    # Check if we should use sharding
+    use_sharding = cfg.get('distributed', {}).get('use_sharding', False)
+    
+    if use_sharding and num_devices > 1:
+        print(f"✓ FSDP sharding ENABLED across {num_devices} devices")
+        mesh, sharding_strategy = setup_mesh_and_sharding(num_devices)
+    else:
+        if num_devices > 1:
+            print(f"⚠ Multiple devices detected but sharding DISABLED")
+            print(f"  Set 'distributed.use_sharding: true' in config to enable")
+        mesh = None
+        sharding_strategy = None
+    print(f"{'='*60}\n")
+
+    # Enable mixed precision if requested
+    if cfg['training']['use_mixed_precision']:
+        jax.config.update('jax_default_matmul_precision', 'bfloat16')
+        print(f"Mixed precision enabled: {cfg['training']['precision']}")
+    
+    # Initialize wandb
+    run = wandb.init(
+        project=cfg['logging']['project'],
+        entity=cfg['logging']['entity'],
+        config=cfg,
+    )
+    
+    # Print diffusion mode
+    diffusion_mode = cfg['diffusion'].get('mode', 'linear')
+    print(f"Diffusion mode: {diffusion_mode}")
+    if diffusion_mode == 'variance_exploding' or diffusion_mode == 've':
+        print(f"  σ_min: {cfg['diffusion']['sigma_min']}")
+        print(f"  σ_max: {cfg['diffusion']['sigma_max']}")
+        print(f"  Weight type: {cfg['diffusion']['weight_type']}")
+    
+    # Save config to wandb run directory
+    config_save_path = os.path.join(wandb.run.dir, 'config.yaml')
+    with open(config_save_path, 'w') as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+    # Create checkpoint directory
+    checkpoint_dir = os.path.abspath(os.path.join(wandb.run.dir, 'checkpoints'))
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # Safety: checkpoints are written to this run's fresh wandb dir, so they can
+    # never land on an existing run. Assert it anyway — dump_model overwrites
+    # both the state pkl and config.yaml in its target dir, so a collision with
+    # the base model we finetune from would be unrecoverable.
+    if cfg.get('start_from_checkpoint'):
+        base_dir = os.path.abspath(cfg['params_path'])
+        assert base_dir != checkpoint_dir, (
+            f"Refusing to start: checkpoint_dir ({checkpoint_dir}) is the "
+            f"directory holding the base model. This would overwrite it."
+        )
+        print(f"Base model (read-only): {base_dir}")
+    print(f"Checkpoints for this run  -> {checkpoint_dir}")
+    
+    # Load dataset
+    num_workers = cfg['data'].get('num_workers', 8)
+    # Batches each worker prefetches ahead of the GPU. Higher = more concurrent
+    # Lustre reads in flight to hide its small-random-read latency.
+    prefetch_factor = cfg['data'].get('prefetch_factor', 4)
+    # Allow the launcher to override the dataset path (e.g. point at a copy
+    # staged on node-local NVMe) without editing the config.
+    data_path = os.environ.get('JADE_DATASET_PATH', cfg['data']['dataset_path'])
+    print(f"Loading dataset from: {data_path}")
+    dataset = load_from_disk(data_path)
+    # Drop unused columns (z, g) so the DataLoader only reads map + theta from arrow
+    keep_cols = [c for c in ("map", "theta") if c in dataset.column_names]
+    dataset = dataset.select_columns(keep_cols)
+    dataset = dataset.with_format("numpy")
+
+    dataset = dataset.train_test_split(
+        test_size=cfg['data']['val_split'],
+        seed=cfg['data']['shuffle_seed']
+    )
+
+    ds_train = dataset["train"]
+    ds_val = dataset["test"]
+    print(f"Train samples: {len(ds_train)}")
+    print(f"Val samples: {len(ds_val)}")
+    print(f"DataLoader workers: {num_workers}")
+
+    # ========================================================================
+    # MODEL INITIALIZATION
+    # ========================================================================
+    # model = JADE_B_16_mixed(
+    #     rngs=nnx.Rngs(cfg['training']['seed']), 
+    #     in_channels=cfg['model']['in_channels'], 
+    #     input_size=cfg['model']['input_size'],
+    #     enable_cond_image=cfg["model"]["enable_cond_image"],
+    #     cond_channels=cfg["model"]["cond_channels"],
+    #     num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
+    #     cond_patch_size=cfg['model']['cond_patch_size'],
+    #     # patch_size=cfg["model"]["patch_size"]
+    # )
+
+    model = JADE_B_16(
+        rngs=nnx.Rngs(cfg['training']['seed']), 
+        in_channels=cfg['model']['in_channels'], 
+        input_size=cfg['model']['input_size'],
+        enable_cond_image=cfg["model"]["enable_cond_image"],
+        cond_channels=cfg["model"]["cond_channels"],
+        num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
+        cond_patch_size=cfg['model']['cond_patch_size'],
+        cond_start=cfg['model']['cond_start'],
+        attn_drop=cfg['model']['attn_drop'],
+        proj_drop=cfg['model']['proj_drop'],
+        attn_impl=cfg['model'].get('attn_impl', 'dense'),
+    )
+
+    model = Denoiser(model, cfg)
+
+    # ========================================================================
+    # CHECKPOINT LOADING (with re-sharding if needed)
+    # ========================================================================
+    if cfg['start_from_checkpoint']:
+        params_tag = cfg.get('params_tag', 'ema_latest')
+        print(f"Loading model from checkpoint: {cfg['params_path']} (tag: {params_tag})")
+        _, ema_params = load_model(cfg['params_path'], f"{cfg['model']['name']}_{params_tag}")
+        
+        # Re-shard loaded params if using FSDP
+        if use_sharding and mesh is not None:
+            print("Re-sharding loaded checkpoint to match current mesh...")
+            ema_params = shard_model_state(
+                ema_params,
+                mesh,
+                sharding_strategy['params']
+            )
+        
+        nnx.update(model, ema_params)
+    else:
+        # EMA setup
+        if cfg['ema']['use_ema']:
+            ema_params = None
+            print(f"EMA will be initialized after first epoch")
+        else:
+            ema_params = None
+            print("EMA disabled")
+    
+    params = nnx.state(model, nnx.Param)
+    total = sum(x.size for x in jax.tree.leaves(params))
+    print(f"Total parameters: {total:,}")
+
+    # Calculate total training steps
+    steps_per_epoch = len(ds_train) // cfg['training']['batch_size']
+    total_steps = cfg['training']['num_epochs'] * steps_per_epoch
+    print(f"Total training steps: {total_steps}")
+
+    # ========================================================================
+    # CRITICAL: SHARD PARAMETERS *BEFORE* CREATING OPTIMIZER
+    # ========================================================================
+    if use_sharding and mesh is not None:
+        print("\nSharding model parameters...")
+        
+        model_params = nnx.state(model, nnx.Param)
+        model_params_sharded = shard_model_state(
+            model_params,
+            mesh,
+            sharding_strategy['params']
+        )
+        nnx.update(model, model_params_sharded)
+        
+        print("✓ Model parameters sharded across devices")
+        
+        # Verify sharding worked
+        print("\n" + "="*60)
+        print("Verifying Parameter Sharding:")
+        print("="*60)
+        
+        params_list = list(jax.tree_util.tree_leaves_with_path(model_params_sharded))
+        
+        # Count sharded vs replicated
+        sharded_count = 0
+        replicated_count = 0
+        sharded_params = 0
+        replicated_params = 0
+        
+        for key, param in params_list:
+            spec = param.sharding.spec if hasattr(param.sharding, 'spec') else None
+            if spec is not None and spec != P():
+                sharded_count += 1
+                sharded_params += param.size
+            else:
+                replicated_count += 1
+                replicated_params += param.size
+        
+        print(f"Sharded parameters: {sharded_count} arrays ({sharded_params:,} elements)")
+        print(f"Replicated parameters: {replicated_count} arrays ({replicated_params:,} elements)")
+        print(f"Total sharding: {sharded_params / (sharded_params + replicated_params) * 100:.1f}% of parameters\n")
+        
+        # Helper function to safely extract path
+        def get_path_string(key):
+            """Extract path string from JAX key path."""
+            parts = []
+            for k in key:
+                if hasattr(k, 'key'):
+                    parts.append(str(k.key))
+                else:
+                    # Handle GetAttrKey and other types
+                    parts.append(str(k).split('(')[0] if '(' in str(k) else str(k))
+            return '.'.join(parts)
+        
+        # Show examples
+        print("Sample sharded parameters:")
+        shown = 0
+        for key, param in params_list:
+            if shown >= 3:
+                break
+            spec = param.sharding.spec if hasattr(param.sharding, 'spec') else None
+            if spec is not None and spec != P():
+                path = get_path_string(key)
+                print(f"  {path}:")
+                print(f"    Shape: {param.shape}")
+                print(f"    Sharding: {param.sharding.spec}")
+                shown += 1
+        
+        print("\nSample replicated parameters:")
+        shown = 0
+        for key, param in params_list:
+            if shown >= 3:
+                break
+            spec = param.sharding.spec if hasattr(param.sharding, 'spec') else None
+            if spec is None or spec == P():
+                path = get_path_string(key)
+                print(f"  {path}:")
+                print(f"    Shape: {param.shape}")
+                print(f"    Sharding: replicated")
+                shown += 1
+        
+        print("="*60 + "\n")
+
+    # ========================================================================
+    # OPTIMIZER SETUP (AFTER sharding params)
+    # ========================================================================
+    opt = create_optimizer(cfg, total_steps)
+    optimizer = nnx.Optimizer(model, opt, wrt=nnx.Param)
+    
+    if use_sharding and mesh is not None:
+        print("✓ Optimizer state automatically sharded to match parameters\n")
+
+    loss_fn = FlowLoss(cfg)
+
+    # ========================================================================
+    # CALIBRATION (TARP-CvM) SETUP
+    # ========================================================================
+    # Adds a differentiable TARP calibration penalty to the flow loss:
+    #     total = flow_loss + lambda_tarp * tarp_cvm_loss
+    # Posterior cosmology draws are produced by integrating the JADE flow ODE
+    # with diffrax (Euler, `num_steps`) under an adjoint, so the gradient
+    # backpropagates through the whole sampler. This is EXPENSIVE: each
+    # calibrated step does ~ n_cal * M * num_steps extra network evals (plus the
+    # adjoint backward). Control the cost with n_cal / M / num_steps and by only
+    # applying it every `every_n_steps` steps.
+    cal_cfg = cfg.get('calibration', {})
+    cal_enabled = cal_cfg.get('enabled', False)
+    lambda_tarp = cal_cfg.get('lambda_tarp', 1.0)
+    cal_n = cal_cfg.get('n_cal', 16)          # observations used for the CvM ECDF
+    cal_M = cal_cfg.get('M', 16)              # posterior draws per observation
+    cal_R = cal_cfg.get('R', 16)              # TARP reference points
+    cal_tau = cal_cfg.get('tau', 0.05)        # soft-indicator temperature
+    cal_steps = cal_cfg.get('num_steps', 50)  # Euler steps for the posterior sampler
+    cal_every = cal_cfg.get('every_n_steps', 1)
+    cal_adjoint = make_adjoint(cal_cfg.get('adjoint', 'backsolve'))
+
+    if cal_enabled:
+        assert cfg['model']['enable_cond_image'], (
+            "Calibration (TARP) needs a conditioning observation; set "
+            "model.enable_cond_image: true"
+        )
+        assert cal_n <= cfg['training']['batch_size'], (
+            f"calibration.n_cal ({cal_n}) must be <= training.batch_size "
+            f"({cfg['training']['batch_size']})"
+        )
+        print(f"\n{'='*60}")
+        print("TARP calibration ENABLED")
+        print(f"  lambda_tarp={lambda_tarp}  n_cal={cal_n}  M={cal_M}  R={cal_R}")
+        print(f"  tau={cal_tau}  num_steps={cal_steps}  every_n_steps={cal_every}")
+        print(f"  adjoint={cal_cfg.get('adjoint', 'backsolve')}")
+        print(f"{'='*60}\n")
+
+    # ========================================================================
+    # TRAINING STEP
+    # ========================================================================
+    @nnx.jit
+    def train_step(model, optimizer, x, cosmo, key, cond=None):
+        """
+        Train step - works with or without sharding.
+        JAX automatically handles sharding based on parameter sharding.
+        """
+        (loss, (_, _)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(
+            model=model, x=x, cosmo=cosmo, cond=cond, key=key,
+            lambda_cosmo=cfg['loss']['lambda_cosmo'], train=True
+        )
+
+        optimizer.update(model, grads)
+
+        return loss
+
+    @nnx.jit
+    def train_step_calibrated(model, optimizer, x, cosmo, key, cal_key, cond):
+        """Flow loss + TARP calibration penalty, in one grad pass."""
+        def combined(model):
+            flow_loss, (loss_x, loss_cosmo) = loss_fn(
+                model=model, x=x, cosmo=cosmo, cond=cond, key=key,
+                lambda_cosmo=cfg['loss']['lambda_cosmo'], train=True,
+            )
+            # (cond_i, cosmo_i) is a joint draw -> a valid TARP tuple. Use the
+            # first cal_n examples of the batch for the calibration ECDF.
+            tarp_loss = tarp_cvm_loss(
+                model, cond[:cal_n], cosmo[:cal_n], cal_key,
+                M=cal_M, R=cal_R, tau=cal_tau, num_steps=cal_steps,
+                adjoint=cal_adjoint,
+            )
+            total = flow_loss + lambda_tarp * tarp_loss
+            return total, (flow_loss, tarp_loss)
+
+        (total, (flow_loss, tarp_loss)), grads = nnx.value_and_grad(
+            combined, has_aux=True
+        )(model)
+        optimizer.update(model, grads)
+        return total, flow_loss, tarp_loss
+
+    @jax.jit
+    def update_ema(ema_params, model_params, decay):
+        """Update EMA parameters"""
+        return jax.tree.map(
+            lambda ema, new: decay * ema + (1 - decay) * new,
+            ema_params,
+            model_params
+        )
+
+    key = jax.random.key(cfg['training']['seed'])
+    best_val_loss = float('inf')
+    step = 0
+
+    lap = 0 if not cfg['start_from_checkpoint'] else cfg['lap']
+    num_epochs = cfg['training']['num_epochs']
+
+    # ========================================================================
+    # CORNER-PLOT REFERENCE: fixed observation + MCMC posterior samples
+    # ========================================================================
+    mcmc_ref_dir = cfg.get('logging', {}).get(
+        'mcmc_ref_dir', 'mcmc_log_normal'
+    )
+    corner_obs = None
+    corner_mcmc = None
+    corner_truth = None
+    try:
+        with open(os.path.join(mcmc_ref_dir, 'mcmc_log_obs_truth.pkl'), 'rb') as f:
+            ref = pickle.load(f)
+        with open(os.path.join(mcmc_ref_dir, 'mcmc_log_posterior_samples.pkl'), 'rb') as f:
+            corner_mcmc = pickle.load(f)
+        corner_obs = jnp.asarray(ref['y'])
+        corner_truth = np.asarray(ref['theta'])
+        print(f"Corner-plot reference loaded from {mcmc_ref_dir}")
+    except FileNotFoundError as e:
+        print(f"Corner-plot reference not found ({e}); skipping corner plots")
+
+    # ========================================================================
+    # TRAINING LOOP
+    # ========================================================================
+    train_loader = DataLoader(
+        ds_train,
+        batch_size=cfg['training']['batch_size'],
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=hf_collate,
+        drop_last=True,
+        persistent_workers=num_workers > 0,
+        pin_memory=False,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        multiprocessing_context='forkserver' if num_workers > 0 else None,
+    )
+
+    for epoch in range(num_epochs):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg['training']['num_epochs']}"):
+
+            batch = normalize_batch(batch)
+
+            key, subkey = jax.random.split(key, 2)
+            x = augment(batch["map"], jax.random.split(subkey, len(batch["map"])))
+            cosmo = batch["theta"] * cfg['loss']['SCALE_COSMO']
+            
+            key, subkey = jax.random.split(key, 2)
+            # Noisy field condition
+            if cfg["model"]["enable_cond_image"]:
+                cond_field = make_cond(x, subkey)
+            else:
+                cond_field = None
+
+            key, subkey = jax.random.split(key, 2)
+            tarp_loss_val = None
+            if cal_enabled and (step % cal_every == 0):
+                key, cal_key = jax.random.split(key, 2)
+                loss, flow_loss_val, tarp_loss_val = train_step_calibrated(
+                    model, optimizer, x, cosmo, subkey, cal_key, cond_field
+                )
+            else:
+                loss = train_step(model, optimizer, x, cosmo, subkey, cond=cond_field)
+
+            # ================================================================
+            # EMA INITIALIZATION (with sharding)
+            # ================================================================
+            if cfg['ema']['use_ema'] and ema_params is None and epoch >= 1 and not cfg["start_from_checkpoint"]:
+                ema_params = jax.tree.map(lambda x: x.copy(), nnx.state(model, nnx.Param))
+                
+                # CRITICAL: Shard EMA params if using FSDP
+                if use_sharding and mesh is not None:
+                    ema_params = shard_model_state(
+                        ema_params,
+                        mesh,
+                        sharding_strategy['params']
+                    )
+                
+                print(f"EMA initialized from trained model at epoch {epoch}")
+            
+            # Update EMA (only if initialized)
+            if cfg['ema']['use_ema'] and ema_params is not None:
+                current_params = nnx.state(model, nnx.Param)
+                ema_params = update_ema(ema_params, current_params, cfg['ema']['decay'])
+            
+            # Logging
+            if step % cfg['logging']['log_every_n_steps'] == 0:
+                log_dict = {"train/loss_total": loss, "train/epoch": epoch}
+                if tarp_loss_val is not None:
+                    log_dict["train/tarp"] = tarp_loss_val
+                    log_dict["train/flow_loss"] = flow_loss_val
+                run.log(log_dict)
+            
+            step += 1
+
+        # ====================================================================
+        # VALIDATION
+        # ====================================================================
+        if cfg['ema']['use_ema'] and ema_params is not None:
+            original_params = nnx.state(model, nnx.Param)
+            nnx.update(model, ema_params)
+        
+        losses = []
+        losses_x = []
+        losses_cosmo = []
+        val_loader = DataLoader(
+            ds_val,
+            batch_size=cfg['training']['batch_size'],
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=hf_collate,
+            drop_last=False,
+            persistent_workers=num_workers > 0,
+            pin_memory=False,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
+            multiprocessing_context='forkserver' if num_workers > 0 else None,
+        )
+        # Only evaluate val loss on a capped number of batches — a few thousand
+        # samples give a stable estimate, so we don't burn time on all ~50k.
+        # (val_loader has shuffle=False, so it's the same subset every epoch.)
+        val_max_batches = cfg.get('validation', {}).get('max_batches', None)
+        for vi, batch in enumerate(val_loader):
+            if val_max_batches is not None and vi >= val_max_batches:
+                break
+            batch = normalize_batch(batch)
+            x_val = batch["map"]
+            cosmo_val = batch["theta"] * cfg['loss']['SCALE_COSMO']
+
+            key, val_key = jax.random.split(key, 2)
+
+            if cfg["model"]["enable_cond_image"]:
+                cond_val = make_cond(x_val, val_key)
+            else:
+                cond_val = None
+
+            val_loss, (val_loss_x, val_loss_cosmo) = loss_fn(
+                model=model, x=x_val, cosmo=cosmo_val, key=val_key,
+                lambda_cosmo=cfg['loss']['lambda_cosmo'], train=False,
+                cond=cond_val,
+            )
+            losses.append(val_loss)
+            losses_x.append(val_loss_x)
+            losses_cosmo.append(val_loss_cosmo)
+
+        val_loss = np.mean(losses)
+        val_loss_x = np.mean(losses_x)
+        val_loss_cosmo = np.mean(losses_cosmo)
+        
+        run.log({
+            "val/loss_total": val_loss,
+            "val/v_loss_field": val_loss_x,
+            "val/v_loss_cosmo": val_loss_cosmo,
+            "epoch": epoch + 1,
+        })
+
+        model_type = "EMA" if cfg['ema']['use_ema'] else "Standard"
+        print(f"Epoch {epoch + 1}, Val Loss ({model_type}): {val_loss:.4f} "
+              f"(v_field: {val_loss_x:.4f}, v_cosmo: {val_loss_cosmo:.4f})")
+
+        # Visualization
+        if (epoch + 1) % cfg['logging']['visualize_every_n_epochs'] == 0:
+            fig = plot_denoiser(x_val, cosmo_val, model, key, cfg)
+            tag = "denoiser_ema" if cfg['ema']['use_ema'] else "denoiser"
+            wandb.log({tag: wandb.Image(fig)})
+            plt.close(fig)
+        
+            key, subkey = jax.random.split(key, 2)
+            
+            sampler = HeunSampler(model=model, num_steps=50)
+            
+            keys = jax.random.split(subkey, 3)
+            x_0 = jax.random.normal(keys[0], shape=(6, 128, 128, 5))
+            cosmo_0 = jax.random.normal(keys[1], shape=(6, 6))
+
+            keys = jax.random.split(keys[2], 6)
+            if cfg["model"]["enable_cond_image"]:
+                cond_plot = make_cond(x_val[:6], keys[2])
+            else:
+                cond_plot = None
+
+            x_samples, cosmo_samples = jax.vmap(sampler)(x_0, cosmo_0, cond_plot, keys)
+
+            fig = plot_samples(x_samples, cosmo_samples/cfg['loss']['SCALE_COSMO'], n_samples=6)
+            wandb.log({"samples": wandb.Image(fig)})
+            plt.close(fig)
+
+            # Corner plot: posterior on cosmology vs. reference MCMC for a fixed obs
+            if corner_obs is not None and cfg["model"]["enable_cond_image"]:
+                key, subkey = jax.random.split(key, 2)
+                n_corner = 128
+                corner_keys = jax.random.split(subkey, 3)
+                x0_c = jax.random.normal(corner_keys[0], shape=(n_corner, 128, 128, 5))
+                cosmo0_c = jax.random.normal(corner_keys[1], shape=(n_corner, 6))
+                vmap_keys = jax.random.split(corner_keys[2], n_corner)
+                cond_c = (corner_obs - FIELD_MEAN.reshape(1, 1, -1)) / FIELD_STD.reshape(1, 1, -1)
+                _, cosmo_post = jax.vmap(sampler, in_axes=(0, 0, None, 0))(
+                    x0_c, cosmo0_c, cond_c, vmap_keys
+                )
+                theta_post = np.asarray(cosmo_post) / cfg['loss']['SCALE_COSMO'] * THETA_STD + THETA_MEAN
+                fig = plot_corner(theta_post, corner_mcmc, corner_truth)
+                wandb.log({"corner": wandb.Image(fig)})
+                plt.close('all')
+
+        # Restore original params if using EMA
+        if cfg['ema']['use_ema'] and ema_params is not None:
+            nnx.update(model, original_params)
+
+        # ====================================================================
+        # CHECKPOINT SAVING
+        # ====================================================================
+        if (epoch + 1) % cfg['checkpoint']['save_every_n_epochs'] == 0:
+            
+            # Save EMA checkpoint (primary)
+            if cfg['ema']['use_ema'] and ema_params is not None:
+                dump_model(
+                    cfg,
+                    ema_params,
+                    f"{cfg['model']['name']}_ema_latest",
+                    checkpoint_dir,
+                )
+                
+            dump_model(
+                cfg,
+                nnx.state(model, nnx.Param),
+                f"{cfg['model']['name']}_latest",
+                checkpoint_dir,
+            )
+            
+            # Save best checkpoint
+            if cfg['checkpoint']['keep_best'] and val_loss_cosmo < best_val_loss:
+                # best_val_loss = val_loss
+                best_val_loss = val_loss_cosmo  # Track best based on cosmology loss
+                if cfg['ema']['use_ema'] and ema_params is not None:
+                    dump_model(
+                        cfg,
+                        ema_params,
+                        f"{cfg['model']['name']}_ema_best",
+                        checkpoint_dir,
+                    )
+
+                dump_model(
+                    cfg,
+                    nnx.state(model, nnx.Param),
+                    f"{cfg['model']['name']}_best",
+                    checkpoint_dir,
+                )
+
+                print(f"✓ Best model saved (val_loss: {val_loss:.4f})")
+            
+            print(f"✓ Checkpoints saved")
+
+    print("Training complete!")
+    wandb.finish()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train the JADE model with optional FSDP.")
+    parser.add_argument(
+        "--config", 
+        type=str, 
+        default="configs/default.yaml",
+        help="Path to config file"
+    )
+    args = parser.parse_args()
+
+    def parse_config(cfg):
+        """Recursively convert string numbers to actual numbers in config"""
+        if isinstance(cfg, dict):
+            return {k: parse_config(v) for k, v in cfg.items()}
+        elif isinstance(cfg, list):
+            return [parse_config(v) for v in cfg]
+        elif isinstance(cfg, str):
+            # Try to convert to number
+            try:
+                if '.' in cfg or 'e' in cfg.lower():
+                    return float(cfg)
+                else:
+                    return int(cfg)
+            except ValueError:
+                return cfg
+        else:
+            return cfg
+
+    # Load configuration
+    with open(args.config, 'r') as f:
+        cfg = yaml.safe_load(f)
+
+    cfg = parse_config(cfg) 
+
+    # Print config
+    print("="*50)
+    print("Configuration:")
+    print("="*50)
+    import pprint
+    pprint.pprint(cfg)
+    print("="*50)
+    
+    # Run training
+    train(cfg)

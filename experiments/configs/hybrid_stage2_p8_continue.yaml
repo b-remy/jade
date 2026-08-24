@@ -1,0 +1,82 @@
+# Continued stage-2 fine-tuning from run by4dv8sg (which itself was a stage-2
+# run on top of e06v6sdj). Architecture identical to hybrid_stage2_p8.yaml.
+# Differences vs that config:
+#   - params_dir / params_name → by4dv8sg's last EMA checkpoint
+#   - constant LR ≈ where the previous run ended (no schedule restart that
+#     would jump LR back up to 5e-4 on step 0)
+
+model:
+  name: "JADE_B_16"
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: true
+  cond_channels: 5
+  patch_size: 8
+  cond_patch_size: 8
+  num_cosmo_tokens: 16
+  cond_start: 0
+  attn_drop: 0.0
+  proj_drop: 0.0
+  split_qkv: true
+
+stage2:
+  strategy: "medium"
+  # Continue from by4dv8sg's last EMA checkpoint.
+  # convert_state_split_qkv is idempotent on already-split states (no-op).
+  params_dir: "/u/bremy/repos/jade/experiments/wandb/run-20260504_100148-by4dv8sg/files/checkpoints"
+  params_name: "JADE_B_16_ema_latest"
+  verify_freeze: true
+
+training:
+  num_epochs: 600
+  batch_size: 100
+  seed: 42
+  use_mixed_precision: true
+  precision: "bfloat16"
+
+# Continuation: hold LR at by4dv8sg's end_value (5e-5) instead of restarting
+# the linear schedule from 5e-4. Optimizer moments still reset to zero — that
+# transient is unavoidable without persisting opt state across runs.
+optimizer:
+  type: "adamw"
+  learning_rate: 5e-5
+  weight_decay: 0.
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+
+  use_schedule: false
+
+ema:
+  use_ema: true
+  decay: 0.999
+
+diffusion:
+  model: "linear"
+  time_distribution: "logit"
+  mu: -0.8
+  sigma: 0.8
+  t_eps: 0.05
+
+data:
+  dataset_path: "sbi_lens_full"
+  val_split: 0.05
+  shuffle_seed: 42
+  num_workers: 8
+
+checkpoint:
+  dir: "checkpoints"
+  save_every_n_epochs: 1
+  keep_best: true
+
+logging:
+  project: "jade"
+  entity: "b-remy"
+  log_every_n_steps: 10
+  visualize_every_n_epochs: 10
+
+loss:
+  type: "v-loss"
+  mixture: false
+  lambda_cosmo: 10.
+  SCALE_COSMO: 1

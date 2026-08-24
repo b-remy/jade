@@ -1,0 +1,101 @@
+# Diagnostic test: train cosmology only, no field denoising. Classical jade
+# architecture (nn_hybrid), same θ schedule as summary.yaml. The field loss is
+# computed (still logged) but contributes zero gradient via cfg.loss.cosmo_only=true.
+#
+# Purpose: isolate whether the architecture + θ schedule can deliver
+# MCMC-quality cosmology contours when not competing with field training for
+# shared-backbone gradient. If contours match MCMC here, the joint dilution is
+# the limiter; if not, the architecture / schedule needs more work.
+#
+# NOTE: this run does NOT produce a usable joint model — the field branch
+# becomes unsupervised (acts as a feature extractor for the cosmo branch but
+# isn't itself trained to denoise). Use only for the diagnostic test.
+
+model:
+  arch: "hybrid"
+  name: "JADE_B_16"
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: true
+  cond_channels: 5
+  patch_size: 8
+  cond_patch_size: 8
+  num_cosmo_tokens: 16
+  cond_start: 0
+  attn_drop: 0.3
+  proj_drop: 0.3
+  # Drop κ tokens from the attention sequence entirely. The model only sees
+  # [cosmo | cond] (no field), and field_pred is returned as zeros. Combined
+  # with loss.cosmo_only=true, this is the no-κ diagnostic: tests whether the
+  # cosmo branch can match MCMC contours when not sharing attention with κ.
+  # Cuts attention memory ~(528/272)² ≈ 3.8× vs. the κ-included variant.
+  disable_field_tokens: true
+
+training:
+  num_epochs: 600
+  batch_size: 256
+  seed: 42
+  use_mixed_precision: true
+  precision: "bfloat16"
+
+distributed:
+  use_sharding: true
+
+optimizer:
+  type: "adamw"
+  learning_rate: 1e-5
+  weight_decay: 0.
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+  use_schedule: true
+  schedule:
+    init_value: 5e-3
+    end_value: 1e-4
+
+ema:
+  use_ema: true
+  decay: 0.9996
+
+diffusion:
+  model: "linear"
+  time_distribution: "logit"
+  mu: -0.8
+  sigma: 0.8
+  t_eps: 0.05
+  mu_kappa: -0.8
+  sigma_kappa: 0.8
+  # Same θ schedule as summary.yaml (biased toward low t for amortized regime).
+  mu_theta: -1.0
+  sigma_theta: 1.5
+
+data:
+  dataset_path: "sbi_lens_full"
+  val_split: 0.05
+  shuffle_seed: 42
+  num_workers: 16
+
+checkpoint:
+  dir: "checkpoints"
+  save_every_n_epochs: 1
+  keep_best: true
+  snapshot_every_n_epochs: 50
+
+logging:
+  project: "jade"
+  entity: "b-remy"
+  log_every_n_steps: 50
+  visualize_every_n_epochs: 10
+  mcmc_ref_dir: "mcmc_log_normal"
+
+loss:
+  type: "v-loss"
+  mixture: false
+  lambda_cosmo: 10.
+  SCALE_COSMO: 1
+  # ↓ The diagnostic flag: total_loss = loss_cosmo only. Field loss has no
+  # gradient. Don't use this for production — it's only for testing whether
+  # the cosmo branch can match MCMC in isolation.
+  cosmo_only: true
+
+start_from_checkpoint: false
