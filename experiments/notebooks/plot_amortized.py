@@ -25,12 +25,10 @@ mpl.rcParams.update({
 })
 import numpy as np
 
-# from jade.nn_conditional import JADE_B_16
 from jade.nn_hybrid import JADE_B_16
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD
 from jade.flow import Denoiser
 from jade.utils import load_model
-from train import plot_denoiser, normalize_batch
 
 from datasets import load_from_disk
 
@@ -44,79 +42,17 @@ print(jax.devices())
 from jade.init import sigma_lsst
 print("sigma_lsst", sigma_lsst)
 
-from jade.jade_fuse import JADE_FUSE_B_16_mixed
-from jade.nn_patch import JADE_B_16_mixed
-
 save_dir = 'amortized'
 
+# The paper model: wandb run 7hnur00g, i.e. configs/finetune.yaml finetuned
+# from the configs/hybrid.yaml run e06v6sdj on the 100k-simulation
+# sbi_lens_full dataset.
 cfg, states = load_model(
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260210_174412-mzczznxv/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260211_134514-3lgcf0yj/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260211_231954-bzn2meri/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260212_161618-mvdbkagz/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260213_094725-gvlkj3u8/files/checkpoints",
-    
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260216_003019-3afzmbtk/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260216_113125-oo0qj7m5/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260216_215834-uvlfixxc/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260217_144342-cd9l9a8s/files/checkpoints",
-
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260217_173825-gbm2flrd/files/checkpoints",
-    #  "/u/bremy/repos/jade/experiments/wandb/run-20260218_132547-3685luj0/files/checkpoints",
-    
-    
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260221_001138-1g4mzv90/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260221_001420-y91pn6l8/files/checkpoints",
-    
-    
-    # "/u/bremy/repos/jade/experiments/run-20260219_232046-jhj5rm2p/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260414_223438-2kx88ezd/files/checkpoints",
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260414_232810-e06v6sdj/files/checkpoints",
-    # Stage-2 split-QKV run, finetuned from e06v6sdj (cond_patch_size=8).
-    # "/u/bremy/repos/jade/experiments/wandb/run-20260504_100148-by4dv8sg/files/checkpoints",
-
-     "/u/bremy/repos/jade/experiments/wandb/run-20260507_170014-7hnur00g/files/checkpoints",
-    #"/u/bremy/repos/jade/experiments/wandb/run-20260511_095814-kj94osc8/files/checkpoints",
-
-    #"JADE_B_16_ema_latest"
-     "JADE_B_16_latest"
-    #"JADE_B_16_ema_best"
+    "/u/bremy/repos/jade/experiments/wandb/run-20260507_170014-7hnur00g/files/checkpoints",
+    "JADE_B_16_latest",
 )
 
 SCALE_COSMO = 1
-
-# model = JADE_FUSE_B_16_mixed(
-#         rngs=nnx.Rngs(cfg['training']['seed']), 
-#         in_channels=cfg['model']['in_channels'], 
-#         input_size=cfg['model']['input_size'],
-#         enable_cond_image=cfg["model"]["enable_cond_image"],
-#         cond_channels=cfg["model"]["cond_channels"],
-#         # patch_size=cfg["model"]["patch_size"]
-#     )
-
-# model = JADE_B_16_mixed(
-#         rngs=nnx.Rngs(cfg['training']['seed']), 
-#         in_channels=cfg['model']['in_channels'], 
-#         input_size=cfg['model']['input_size'],
-#         enable_cond_image=cfg["model"]["enable_cond_image"],
-#         cond_channels=cfg["model"]["cond_channels"],
-#         num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
-#         cond_patch_size=cfg['model']['cond_patch_size'],
-#         # patch_size=cfg["model"]["patch_size"]
-#     )
-
-
-# model = JADE_B_16(
-#         rngs=nnx.Rngs(cfg['training']['seed']), 
-#         in_channels=cfg['model']['in_channels'], 
-#         input_size=cfg['model']['input_size'],
-#         enable_cond_image=cfg["model"]["enable_cond_image"],
-#         cond_channels=cfg["model"]["cond_channels"],
-#         num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
-#         cond_patch_size=cfg['model']['cond_patch_size'],
-#         cond_start=cfg['model']['cond_start'],
-#         patch_size=cfg["model"]["patch_size"]
-#     )
 
 model = JADE_B_16(
         rngs=nnx.Rngs(cfg['training']['seed']),

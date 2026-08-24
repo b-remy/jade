@@ -38,8 +38,6 @@ from tqdm import tqdm
 
 from getdist import MCSamples, plots
 
-# from jade.nn_one_token import JADE_B_16
-from jade.nn_patch import JADE_B_16_mixed
 from jade.nn_hybrid import JADE_B_16
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD, sigma_lsst
 from jade.flow import Denoiser, FlowLoss
@@ -324,17 +322,6 @@ def train(cfg):
     # ========================================================================
     # MODEL INITIALIZATION
     # ========================================================================
-    # model = JADE_B_16_mixed(
-    #     rngs=nnx.Rngs(cfg['training']['seed']), 
-    #     in_channels=cfg['model']['in_channels'], 
-    #     input_size=cfg['model']['input_size'],
-    #     enable_cond_image=cfg["model"]["enable_cond_image"],
-    #     cond_channels=cfg["model"]["cond_channels"],
-    #     num_cosmo_tokens=cfg['model']['num_cosmo_tokens'],
-    #     cond_patch_size=cfg['model']['cond_patch_size'],
-    #     # patch_size=cfg["model"]["patch_size"]
-    # )
-
     model = JADE_B_16(
         rngs=nnx.Rngs(cfg['training']['seed']), 
         in_channels=cfg['model']['in_channels'], 
