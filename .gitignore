@@ -3,7 +3,25 @@
 uv.lock
 *__pycache__*
 *.ipynb
-logs/
-wandb/
 *.slurm
 *egg-info
+
+# datasets, checkpoints and run stores
+wandb
+logs/
+run-*
+sbi_lens*
+
+# sampling / evaluation outputs
+tarp_results
+amortized*/
+IS/
+guidance/
+prior/
+mcmc_log_normal_sample/
+
+*.log
+*.npy
+*.npz
+*.pdf
+*.png

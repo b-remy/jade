@@ -297,7 +297,14 @@ def train(cfg):
     
     # Load dataset
     num_workers = cfg['data'].get('num_workers', 8)
-    dataset = load_from_disk(cfg['data']['dataset_path'])
+    # Batches each worker prefetches ahead of the GPU. Higher = more concurrent
+    # Lustre reads in flight to hide its small-random-read latency.
+    prefetch_factor = cfg['data'].get('prefetch_factor', 4)
+    # Allow the launcher to override the dataset path (e.g. point at a copy
+    # staged on node-local NVMe) without editing the config.
+    data_path = os.environ.get('JADE_DATASET_PATH', cfg['data']['dataset_path'])
+    print(f"Loading dataset from: {data_path}")
+    dataset = load_from_disk(data_path)
     # Drop unused columns (z, g) so the DataLoader only reads map + theta from arrow
     keep_cols = [c for c in ("map", "theta") if c in dataset.column_names]
     dataset = dataset.select_columns(keep_cols)
@@ -339,6 +346,7 @@ def train(cfg):
         cond_start=cfg['model']['cond_start'],
         attn_drop=cfg['model']['attn_drop'],
         proj_drop=cfg['model']['proj_drop'],
+        attn_impl=cfg['model'].get('attn_impl', 'dense'),
     )
 
     model = Denoiser(model, cfg)
@@ -539,6 +547,7 @@ def train(cfg):
         drop_last=True,
         persistent_workers=num_workers > 0,
         pin_memory=False,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         multiprocessing_context='forkserver' if num_workers > 0 else None,
     )
 
@@ -607,22 +616,29 @@ def train(cfg):
             drop_last=False,
             persistent_workers=num_workers > 0,
             pin_memory=False,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
             multiprocessing_context='forkserver' if num_workers > 0 else None,
         )
-        for batch in val_loader:
+        # Only evaluate val loss on a capped number of batches — a few thousand
+        # samples give a stable estimate, so we don't burn time on all ~50k.
+        # (val_loader has shuffle=False, so it's the same subset every epoch.)
+        val_max_batches = cfg.get('validation', {}).get('max_batches', None)
+        for vi, batch in enumerate(val_loader):
+            if val_max_batches is not None and vi >= val_max_batches:
+                break
             batch = normalize_batch(batch)
             x_val = batch["map"]
             cosmo_val = batch["theta"] * cfg['loss']['SCALE_COSMO']
-            
+
             key, val_key = jax.random.split(key, 2)
-            
+
             if cfg["model"]["enable_cond_image"]:
                 cond_val = make_cond(x_val, val_key)
             else:
                 cond_val = None
 
             val_loss, (val_loss_x, val_loss_cosmo) = loss_fn(
-                model=model, x=x_val, cosmo=cosmo_val, key=val_key, 
+                model=model, x=x_val, cosmo=cosmo_val, key=val_key,
                 lambda_cosmo=cfg['loss']['lambda_cosmo'], train=False,
                 cond=cond_val,
             )

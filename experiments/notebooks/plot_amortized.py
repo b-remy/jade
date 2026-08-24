@@ -73,11 +73,14 @@ cfg, states = load_model(
     # "/u/bremy/repos/jade/experiments/wandb/run-20260414_223438-2kx88ezd/files/checkpoints",
     # "/u/bremy/repos/jade/experiments/wandb/run-20260414_232810-e06v6sdj/files/checkpoints",
     # Stage-2 split-QKV run, finetuned from e06v6sdj (cond_patch_size=8).
-    "/u/bremy/repos/jade/experiments/wandb/run-20260504_100148-by4dv8sg/files/checkpoints",
+    # "/u/bremy/repos/jade/experiments/wandb/run-20260504_100148-by4dv8sg/files/checkpoints",
 
-    # "JADE_B_16_ema_latest"
-    # "JADE_B_16_latest"
-    "JADE_B_16_ema_best"
+     "/u/bremy/repos/jade/experiments/wandb/run-20260507_170014-7hnur00g/files/checkpoints",
+    #"/u/bremy/repos/jade/experiments/wandb/run-20260511_095814-kj94osc8/files/checkpoints",
+
+    #"JADE_B_16_ema_latest"
+     "JADE_B_16_latest"
+    #"JADE_B_16_ema_best"
 )
 
 SCALE_COSMO = 1
@@ -137,6 +140,14 @@ model = Denoiser(model, cfg)
 #model = FlowDenoiser(model, cfg)
 nnx.update(model, states)
 
+# Sampler-side t_eps override: with the mixture-finetuned model, the score
+# field is well-trained at t > 0.95. Lowering the v_pred clip from the default
+# 0.05 → 0.01 lets the sampler trust those predictions and refine more
+# aggressively at very low noise — should tighten the slightly-underconfident
+# contours if the residual MSE there is the dominant cause.
+model.t_eps = 0.05
+print(f"Sampler t_eps overridden to {model.t_eps}")
+
 import pickle
 import os
 
@@ -174,8 +185,8 @@ from jade.sampling import EulerSampler, HeunSampler
 # @jax.jit
 def sample(obs, key, states=states, batch_size=128):
     nnx.update(model, states)
-    sampler = EulerSampler(model=model, num_steps=50)
-    # sampler = HeunSampler(model=model, num_steps=50)
+    #sampler = EulerSampler(model=model, num_steps=50)
+    sampler = HeunSampler(model=model, num_steps=200)
     keys = jax.random.split(key, 3)
     x_0 = jax.random.normal(keys[0], shape=(batch_size, 128, 128, 5))
     cosmo_0 = jax.random.normal(keys[1], shape=(batch_size, 6))
@@ -241,7 +252,7 @@ g.triangle_plot(
     alpha=[1.,0.1],
     contour_colors=["#d06e99ff", "black"],  # Colors for 2D contours
     contour_ls=["-", "--"],  # Line styles for 2D contours
-    contour_lws=[2., 2.]  # Line widths for 2D contours
+    contour_lws=[4., 4.]  # Line widths for 2D contours
 )
 
 # Bump tick label sizes on every subplot (getdist's axes_fontsize sometimes
@@ -644,17 +655,17 @@ for i in range(5):
     pdf_std = pdf_samples.std(0)
 
     ax[i].plot(grid, pdf_truth, color='k', label='Truth')
-    ax[i].plot(grid, pdf_mean, color='tab:blue', label='Posterior mean')
+    ax[i].plot(grid, pdf_mean, color='tab:blue', label='JADE samples')
     ax[i].fill_between(grid, pdf_mean - pdf_std, pdf_mean + pdf_std,
                        color='tab:blue', alpha=0.3)
-    ax[i].set_title(f'bin {i + 1}', fontsize=fontsize_text)
+    ax[i].set_title(f'bin {i}', fontsize=fontsize_ticks)
     ax[i].tick_params(axis='both', labelsize=fontsize_ticks)
     ax[i].xaxis.set_major_locator(MaxNLocator(nbins=4))
     ax[i].yaxis.set_major_locator(MaxNLocator(nbins=4))
     ax[i].set_xlim(grid[0], grid[-1])
 
-fig.supxlabel(r'$\kappa$', fontsize=fontsize_text)
-fig.supylabel(r'$p(\kappa)$', fontsize=fontsize_text)
+fig.supxlabel(r'$\kappa$', fontsize=fontsize_ticks, y=-0.08)
+fig.supylabel(r'$p(\kappa)$', fontsize=fontsize_ticks)
 
 handles, labels = ax[0].get_legend_handles_labels()
 fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.08),

@@ -1,0 +1,68 @@
+model:
+  arch: hybrid
+  name: JADE_B_16
+  in_channels: 5
+  input_size: 128
+  enable_cond_image: true
+  cond_channels: 5
+  patch_size: 8
+  cond_patch_size: 8
+  num_cosmo_tokens: 16
+  cond_start: 0
+  attn_drop: 0.0
+  proj_drop: 0.0
+training:
+  num_epochs: 500
+  batch_size: 128
+  seed: 42
+  use_mixed_precision: true
+  precision: bfloat16
+distributed:
+  use_sharding: true
+optimizer:
+  type: adamw
+  learning_rate: 1.0e-05
+  weight_decay: 0.0
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip_norm: 1.0
+  use_schedule: true
+  schedule:
+    init_value: 0.0001
+    end_value: 1.0e-05
+ema:
+  use_ema: true
+  decay: 0.999
+diffusion:
+  model: linear
+  time_distribution: logit
+  mu: -0.8
+  sigma: 0.8
+  t_eps: 0.05
+  mu_aux: 6.0
+  sigma_aux: 0.5
+  p_aux: 0.3
+data:
+  dataset_path: sbi_lens_full
+  val_split: 0.05
+  shuffle_seed: 42
+  num_workers: 8
+checkpoint:
+  dir: checkpoints
+  save_every_n_epochs: 1
+  keep_best: true
+logging:
+  project: jade
+  entity: b-remy
+  log_every_n_steps: 10
+  visualize_every_n_epochs: 10
+  mcmc_ref_dir: mcmc_log_normal
+loss:
+  type: v-loss
+  mixture: false
+  lambda_cosmo: 10.0
+  SCALE_COSMO: 1
+start_from_checkpoint: true
+params_path: /u/bremy/repos/jade/experiments/wandb/run-20260414_232810-e06v6sdj/files/checkpoints
+params_tag: ema_latest
+lap: 0

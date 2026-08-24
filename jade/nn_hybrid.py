@@ -82,14 +82,44 @@ def rotate_half(x):
     return rearrange(x, '... d r -> ... (d r)')
 
 
-def scaled_dot_product_attention(query, key, value, dropout_p=0.0, dropout_key=None, attn_mask=None):
+def scaled_dot_product_attention(query, key, value, dropout_p=0.0, dropout_key=None,
+                                 attn_mask=None, attn_impl="dense"):
     """
     Scaled dot-product attention WITHOUT batch dimension.
     query/key/value: (H, L/S, D)
     dropout_key: if not None and dropout_p > 0, apply dropout to attention weights
     attn_mask: optional additive (L, S) mask (broadcasts over heads); -inf
         entries are zeroed out by the softmax. Used to block θ→κ in stage 2.
+    attn_impl: attention backend.
+        - "dense" (default): explicit float32 einsum + softmax. Exact and the
+          only path that supports an additive ``attn_mask`` and attention
+          dropout.
+        - "xla" / "cudnn": FlashAttention via ``jax.nn.dot_product_attention``
+          (memory-efficient, never materializes the (L, S) score matrix).
+          "cudnn" runs the fused bf16 GPU kernel; "xla" is a portable
+          fallback that also works on CPU. The fused path does NOT support a
+          mask or dropout, so we transparently fall back to "dense" whenever
+          either is active (e.g. the stage-2 θ→κ mask, or training with
+          ``attn_drop > 0``).
+
+    The model is batchless and wrapped in ``jax.vmap`` by the loss/sampler, so
+    ``jax.nn.dot_product_attention`` is called per-sample with a batch dim of 1
+    and vmap supplies the real batch axis.
     """
+    use_flash = attn_impl in ("xla", "cudnn")
+    has_dropout = dropout_key is not None and dropout_p > 0.0
+
+    if use_flash and attn_mask is None and not has_dropout:
+        # (H, N, D) -> (B=1, L=N, H, D) as required by dot_product_attention.
+        # cuDNN runs in bf16; the XLA path keeps the incoming dtype.
+        compute_dtype = jnp.bfloat16 if attn_impl == "cudnn" else query.dtype
+        q = jnp.swapaxes(query, 0, 1)[None].astype(compute_dtype)
+        k = jnp.swapaxes(key,   0, 1)[None].astype(compute_dtype)
+        v = jnp.swapaxes(value, 0, 1)[None].astype(compute_dtype)
+        out = jax.nn.dot_product_attention(q, k, v, implementation=attn_impl)
+        return jnp.swapaxes(out[0], 0, 1).astype(query.dtype)
+
+    # ---- dense fallback: exact float32 path (supports mask + dropout) ----
     scale_factor = 1.0 / math.sqrt(query.shape[-1])
 
     query_f32 = query.astype(jnp.float32)
@@ -99,12 +129,12 @@ def scaled_dot_product_attention(query, key, value, dropout_p=0.0, dropout_key=N
     if attn_mask is not None:
         attn_weight = attn_weight + attn_mask
     attn_weight = jax.nn.softmax(attn_weight, axis=-1)
-    
+
     if dropout_key is not None and dropout_p > 0.0:
         keep_prob = 1.0 - dropout_p
         mask = jax.random.bernoulli(dropout_key, keep_prob, attn_weight.shape)
         attn_weight = jnp.where(mask, attn_weight / keep_prob, 0.0)
-    
+
     output = jnp.einsum('hls,hsd->hld', attn_weight, value)
     return output
 
@@ -132,11 +162,13 @@ class Attention(nnx.Module):
     """
 
     def __init__(self, dim, num_heads=8, qkv_bias=True, qk_norm=True,
-                 attn_drop=0., proj_drop=0., num_theta_tokens=0, rngs=None):
+                 attn_drop=0., proj_drop=0., num_theta_tokens=0,
+                 attn_impl="dense", rngs=None):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.num_theta_tokens = num_theta_tokens
         self.split_qkv = num_theta_tokens > 0
+        self.attn_impl = attn_impl
 
         if self.split_qkv:
             rng_keys = jax.random.split(rngs(), 2)
@@ -197,6 +229,7 @@ class Attention(nnx.Module):
             dropout_p=self.attn_drop_p if train else 0.0,
             dropout_key=attn_key,
             attn_mask=attn_mask,
+            attn_impl=self.attn_impl,
         )
         
         x = rearrange(x, 'H N D -> N (H D)')
@@ -303,14 +336,15 @@ class JiTBlock(nnx.Module):
     """JiT Transformer Block with Adaptive Layer Normalization."""
 
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0,
-                 attn_drop=0.0, proj_drop=0.0, num_theta_tokens=0, rngs=None):
+                 attn_drop=0.0, proj_drop=0.0, num_theta_tokens=0,
+                 attn_impl="dense", rngs=None):
         self.norm1 = RMSNorm(hidden_size, eps=1e-6, rngs=rngs)
         self.norm2 = RMSNorm(hidden_size, eps=1e-6, rngs=rngs)
 
         self.attn = Attention(
             hidden_size, num_heads=num_heads, qkv_bias=True, qk_norm=True,
             attn_drop=attn_drop, proj_drop=proj_drop,
-            num_theta_tokens=num_theta_tokens, rngs=rngs
+            num_theta_tokens=num_theta_tokens, attn_impl=attn_impl, rngs=rngs
         )
         
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -573,6 +607,7 @@ class JADE(nnx.Module):
         cond_start=None,        # ← NEW: block index where conditioning is injected
         split_qkv=False,        # ← NEW: per-modality QKV (stage 2)
         mask_theta_to_field=False,  # ← NEW: block θ→κ in attention (stage 2 obs-only)
+        attn_impl="dense",      # ← NEW: "dense" | "xla" | "cudnn" (FlashAttention)
         rngs=None
     ):
         self.in_channels = in_channels
@@ -588,6 +623,7 @@ class JADE(nnx.Module):
         self.enable_cond_image = enable_cond_image
         self.split_qkv = split_qkv
         self.mask_theta_to_field = mask_theta_to_field
+        self.attn_impl = attn_impl
 
         # Default: inject conditioning at 1/3 of depth (early layers process cosmo+field only)
         self.cond_start = cond_start if cond_start is not None else depth // 3
@@ -673,6 +709,7 @@ class JADE(nnx.Module):
                 attn_drop=attn_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
                 proj_drop=proj_drop if (depth // 4 * 3 > i >= depth // 4) else 0.0,
                 num_theta_tokens=num_theta_tokens,
+                attn_impl=attn_impl,
                 rngs=rngs_blocks[i]
             )
             for i in range(depth)
@@ -926,7 +963,8 @@ def convert_state_split_qkv(state):
 
 def JADE_B_16(rngs, cosmo_dim=6, patch_size=8, enable_cond_image=True, cond_channels=5,
                     num_cosmo_tokens=16, cond_patch_size=16, cond_start=None,
-                    split_qkv=False, mask_theta_to_field=False, **kwargs):
+                    split_qkv=False, mask_theta_to_field=False, attn_impl="dense",
+                    **kwargs):
     """Base model with mixed patch sizes: 8 for target, 16 for conditioning."""
     return JADE(
         depth=12,
@@ -942,6 +980,7 @@ def JADE_B_16(rngs, cosmo_dim=6, patch_size=8, enable_cond_image=True, cond_chan
         cond_start=cond_start,                  # defaults to depth//3 = 4
         split_qkv=split_qkv,                    # per-modality QKV for stage 2
         mask_theta_to_field=mask_theta_to_field,  # block θ→κ in attention
+        attn_impl=attn_impl,                    # "dense" | "xla" | "cudnn" (flash)
         rngs=rngs,
         **kwargs
     )
