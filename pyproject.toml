@@ -1,7 +1,7 @@
 [project]
 name = "jade"
 version = "0.1.0"
-description = "Add your description here"
+description = "Joint diffusion inference of weak lensing convergence maps and cosmology"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,13 +11,21 @@ dependencies = [
     "dm-pix>=0.4.4",
     "einops>=0.8.1",
     "flax>=0.12.6",
+    "getdist>=1.6",
     "jax-cosmo",
     "lenstools",
     "matplotlib>=3.10.7",
+    "mira-score>=0.1.7",
+    "numpyro>=0.15",
     "optax>=0.2.8",
+    "orbax-checkpoint>=0.11",
+    "pyyaml>=6.0",
     "sbi-lens",
+    "scipy>=1.14",
+    "tarp",
     "tfp-nightly>=0.26.0.dev20260414",
     "torch>=2.11.0",
+    "tqdm>=4.66",
     "wandb>=0.23.0",
 ]
 
@@ -29,6 +37,10 @@ packages = ["jade"]
 jax-cosmo = { path = "../jax_cosmo", editable = true }
 sbi-lens = { path = "../sbi_lens", editable = true }
 lenstools = { path = "../LensTools", editable = true }
+# Forks providing the *_efficient variants the joint metrics need; the PyPI
+# releases do not have them.
+tarp = { path = "../tarp", editable = true }
+mira-score = { path = "../mira-score", editable = true }
 
 [dependency-groups]
 dev = [

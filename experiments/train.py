@@ -40,6 +40,7 @@ from getdist import MCSamples, plots
 
 from jade.nn_hybrid import JADE_B_16
 from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD, sigma_lsst
+from jade.paths import MCMC_REF_DIR
 from jade.flow import Denoiser, FlowLoss
 from jade.sampling import EulerSampler, HeunSampler 
 from jade.utils import dump_model, load_model, denormalize_fields, denormalize_cosmo, plot_denoiser, plot_samples
@@ -506,7 +507,7 @@ def train(cfg):
     # CORNER-PLOT REFERENCE: fixed observation + MCMC posterior samples
     # ========================================================================
     mcmc_ref_dir = cfg.get('logging', {}).get(
-        'mcmc_ref_dir', 'mcmc_log_normal'
+        'mcmc_ref_dir', str(MCMC_REF_DIR)
     )
     corner_obs = None
     corner_mcmc = None
@@ -747,10 +748,11 @@ def train(cfg):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the JADE model with optional FSDP.")
     parser.add_argument(
-        "--config", 
-        type=str, 
-        default="configs/default.yaml",
-        help="Path to config file"
+        "--config",
+        type=str,
+        required=True,
+        help="Path to config file, e.g. configs/hybrid.yaml (stage 1) or "
+             "configs/finetune.yaml (stage 2, the paper model)"
     )
     args = parser.parse_args()
 

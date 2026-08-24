@@ -31,8 +31,18 @@ from sbi_lens.simulator.LogNormal_field import lensingLogNormal
 from functools import partial
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="NUTS reference chain for the Figure 5 comparison. Writes "
+                    "to a fresh directory by default so the committed "
+                    "mcmc_log_normal/ reference is not overwritten."
+    )
+    parser.add_argument("--out", default="./mcmc_log_normal_traced")
+    parser.add_argument("--num-results", type=int, default=3_000)
+    parser.add_argument("--num-warmup", type=int, default=500)
+    parser.add_argument("--num-chains", type=int, default=10)
+    args = parser.parse_args()
 
-    save_dir = "./mcmc_log_normal_traced"
+    save_dir = args.out
     os.makedirs(save_dir, exist_ok=True)
 
     # sample at Planck15 fiducial cosmology
@@ -99,9 +109,9 @@ def main():
     # initialize from the truth
     init_values = {k: model_trace[k]['value'] for k in ['z', 'omega_c', 'sigma_8', 'omega_b', 'h_0', 'n_s', 'w_0']}
 
-    num_results = 3_000
-    num_warmup = 500
-    num_chains = 10
+    num_results = args.num_results
+    num_warmup = args.num_warmup
+    num_chains = args.num_chains
     max_tree_depth = 6
     step_size = 1e-2
 
