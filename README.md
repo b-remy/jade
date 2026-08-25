@@ -39,6 +39,10 @@ The `tarp` and `mira-score` dependencies are forks, providing the `get_tarp_cove
 
 [paper.md](paper.md) identifies the training run behind every published result, gives the commands for each stage in order, and records the caveats that matter for getting the same numbers back.
 
+## TODO
+
+- [ ] Publish the `tarp` and `mira-score` forks.
+
 ## Citation
 
 If you find this project useful for your research, please consider citing
