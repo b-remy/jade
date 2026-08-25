@@ -228,3 +228,45 @@ def plot_samples(x_samples, cosmo_samples, n_samples=6, denormalize=True):
 #     ps_auto = np.array(ps_auto)
 
 #     return ell, ps_auto, ps_cross
+
+def load_config(path):
+    """Load a YAML config, coercing numeric strings to numbers."""
+    def coerce(v):
+        if isinstance(v, dict):
+            return {k: coerce(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [coerce(x) for x in v]
+        if isinstance(v, str):
+            try:
+                return float(v) if '.' in v or 'e' in v.lower() else int(v)
+            except ValueError:
+                return v
+        return v
+
+    with open(path, 'r') as f:
+        return coerce(yaml.safe_load(f))
+
+
+def plot_corner(theta_post, mcmc_samples, theta_truth):
+    """Triangle plot comparing the diffusion posterior to a reference chain."""
+    from getdist import MCSamples, plots
+
+    names = [r"$\Omega_c$", r"$\Omega_b$", r"$\sigma_8$", r"$h_0$", r"$n_s$", r"$w_0$"]
+    s_post = MCSamples(samples=np.asarray(theta_post), names=names, label="Diffusion")
+    s_mcmc = MCSamples(samples=np.asarray(mcmc_samples), names=names, label="MCMC")
+
+    g = plots.get_subplot_plotter()
+    g.settings.axes_fontsize = 14
+    g.settings.axes_labelsize = 16
+    g.settings.legend_fontsize = 16
+    g.triangle_plot(
+        [s_post, s_mcmc],
+        names,
+        markers=np.asarray(theta_truth),
+        marker_args={"lw": 1},
+        filled=[True, False],
+        contour_colors=["#d06e99ff", "black"],
+        contour_ls=["-", "--"],
+        contour_lws=[2., 2.],
+    )
+    return plt.gcf()

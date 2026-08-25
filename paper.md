@@ -17,9 +17,11 @@ Every result in the paper comes from **one training run**:
 | objective | flow matching / v-prediction (`jade/flow.py`), *not* the score-matching formulation |
 | training set | `sbi_lens_full` — 99,999 log-normal simulations, 128×128, 5×5 deg², 5 tomographic bins, wCDM |
 
-Two checkpoint tags from that run are used, and they are not interchangeable:
-`JADE_B_16_latest` for the figures, `JADE_B_16_ema_best` for the calibration
-metrics. Each script defaults to the one its paper result used.
+Two checkpoints of that run are used: `JADE_B_16_latest` (final epoch) for the
+figures, `JADE_B_16_ema_best` (lowest cosmology validation loss) for the
+calibration metrics. Each script defaults to the one its paper result used. The
+`ema_` prefix means nothing — all four tags hold EMA weights, so `latest` and
+`ema_latest` are byte-identical, as are `best` and `ema_best`.
 
 ## Artifact locations
 
