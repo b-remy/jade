@@ -1,5 +1,8 @@
 # Joint inference of weak lensing convergence map and cosmology with diffusion models
 
+[![arXiv](https://img.shields.io/badge/arXiv-2606.31988-b31b1b.svg)](https://arxiv.org/abs/2606.31988)&nbsp;
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)&nbsp;
+
 This repository contains the official implementation of the paper [Joint inference of weak lensing convergence map and cosmology with diffusion models](https://arxiv.org/abs/2606.31988) by [Benjamin Remy](https://github.com/b-remy), [Chihway Chang](https://chihway.github.io/) and [Rebecca Willett](https://willett.psd.uchicago.edu/).
 
 <p align="center">
