@@ -105,38 +105,3 @@ class HeunSampler(Sampler):
         cosmo_next = cosmot + dt_cosmo * v_cosmo
 
         return x_next, cosmo_next
-
-class DDPM(Sampler):
-
-    def step(self, xt, cosmot, t, t_next, key):
-        """
-        xt: current state
-        cosmot: current cosmology
-        t: current time
-        t_next: next time
-        """
-
-        x_pred, cosmo_pred = self.model.x_pred(xt, cosmot, t, False)
-
-        alpha_t = 1.0 - t
-        sigma_t = jnp.clip(t, a_min=self.model.t_eps)
-
-        alpha_t_next = jnp.clip(1.0 - t_next, a_min=self.model.t_eps)
-        sigma_t_next = t_next
-
-        # tau = 1 - (alpha_t / alpha_t_next * sigma_t_next / sigma_t)**2
-        tau = 1 - (alpha_t_next / alpha_t * sigma_t / sigma_t_next)**2
-
-        keys = jax.random.split(key, 2)
-        eps_x = jax.random.normal(keys[0], shape=xt.shape)
-        eps_cosmo = jax.random.normal(keys[1], shape=cosmot.shape)
-
-        x_next = alpha_t_next * x_pred
-        x_next = x_next + sigma_t_next * jnp.sqrt(1 - tau) / sigma_t * (xt - alpha_t * x_pred)
-        x_next = x_next + sigma_t_next * jnp.sqrt(tau) * eps_x
-
-        cosmo_next = alpha_t_next * cosmo_pred
-        cosmo_next = cosmo_next + sigma_t_next * jnp.sqrt(1-tau) / sigma_t * (cosmot - alpha_t * cosmo_pred)
-        cosmo_next = cosmo_next + sigma_t_next * jnp.sqrt(tau) * eps_cosmo
-
-        return x_next, cosmo_next
