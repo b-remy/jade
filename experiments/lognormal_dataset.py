@@ -3,22 +3,21 @@ Generate a HuggingFace dataset of lensing maps using sbi_lens simulator.
 Supports parallel independent jobs via --job-id using JAX fold_in.
 """
 
-import jax
-import jax.numpy as jnp
+import argparse
 from functools import partial
 from pathlib import Path
-from tqdm import tqdm
-from datasets import Dataset, Features, Array3D, Sequence, Value
-import argparse
 
+import jax
+from datasets import Array3D, Dataset, Features, Sequence, Value
 from sbi_lens.config import config_lsst_y_10
 from sbi_lens.simulator.LogNormal_field import lensingLogNormal
+from tqdm import tqdm
 from utils import get_samples
-
 
 # ------------------------------------------------------------------
 # Model setup
 # ------------------------------------------------------------------
+
 
 def setup_model(N=128, map_size=5, with_noise=False):
     sigma_e = config_lsst_y_10.sigma_e
@@ -50,6 +49,7 @@ def setup_model(N=128, map_size=5, with_noise=False):
 # Batch generation
 # ------------------------------------------------------------------
 
+
 def make_sample_fn(model, batch_size, with_noise=False):
     """Build the jitted sampling function once so it is reused (compiled a
     single time) across all batches, instead of recompiling per batch."""
@@ -71,9 +71,11 @@ def generate_batch(sample_fn, key):
 
     return maps, theta
 
+
 # ------------------------------------------------------------------
 # Generator
 # ------------------------------------------------------------------
+
 
 def sample_generator(
     N,
@@ -103,9 +105,11 @@ def sample_generator(
                 "theta": theta[i],
             }
 
+
 # ------------------------------------------------------------------
 # Dataset creation
 # ------------------------------------------------------------------
+
 
 def generate_dataset(
     total_samples,
@@ -123,7 +127,7 @@ def generate_dataset(
 
     print(f"\nJob ID: {job_id}")
     print(f"Base seed: {base_seed}")
-    print(f"Using fold_in → independent PRNG stream\n")
+    print("Using fold_in → independent PRNG stream\n")
 
     output_dir = Path(output_dir) / f"job_{job_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -132,7 +136,7 @@ def generate_dataset(
     model = setup_model(N=N, map_size=map_size, with_noise=with_noise)
 
     print("Determining data structure...")
-    #test_key, _ = jax.random.split(job_key)
+    # test_key, _ = jax.random.split(job_key)
     test_key = jax.random.key(0)
     test_sample_fn = make_sample_fn(model, 1, with_noise)
     test_maps, test_theta = generate_batch(test_sample_fn, test_key)
@@ -140,10 +144,12 @@ def generate_dataset(
     map_shape = test_maps.shape[1:]
     n_params = test_theta.shape[1]
 
-    features = Features({
-        "map": Array3D(dtype="float32", shape=map_shape),
-        "theta": Sequence(Value(dtype="float32"), length=n_params),
-    })
+    features = Features(
+        {
+            "map": Array3D(dtype="float32", shape=map_shape),
+            "theta": Sequence(Value(dtype="float32"), length=n_params),
+        }
+    )
 
     # gen = lambda: sample_generator(
     #     model,
@@ -183,6 +189,7 @@ def generate_dataset(
 
     return dataset
 
+
 def main():
     parser = argparse.ArgumentParser(description="Generate lensing map dataset")
 
@@ -193,10 +200,8 @@ def main():
     parser.add_argument("--map-size", type=float, default=5.0)
     parser.add_argument("--with-noise", action="store_true")
 
-    parser.add_argument("--seed", type=int, default=0,
-                        help="Base random seed")
-    parser.add_argument("--job-id", type=int, required=True,
-                        help="Parallel job id (0,1,2,...)")
+    parser.add_argument("--seed", type=int, default=0, help="Base random seed")
+    parser.add_argument("--job-id", type=int, required=True, help="Parallel job id (0,1,2,...)")
 
     args = parser.parse_args()
 

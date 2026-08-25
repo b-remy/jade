@@ -1,23 +1,11 @@
-import itertools
-from functools import partial
 from pathlib import Path
 
-import astropy.units as u
 import jax
 import jax.numpy as jnp
-import jax_cosmo as jc
 import numpy as np
-import numpyro
-import numpyro.distributions as dist
-import tensorflow_probability as tfp
-from lenstools import ConvergenceMap
-from numpyro import sample
-from numpyro.handlers import condition, reparam, seed, trace
-from numpyro.infer.reparam import LocScaleReparam, TransformReparam
+from numpyro.handlers import condition, seed, trace
+from tensorflow_probability.substrates import jax as tfp
 
-from sbi_lens.simulator.redshift import subdivide
-
-tfp = tfp.substrates.jax
 tfd = tfp.distributions
 
 np.complex = complex
@@ -79,11 +67,9 @@ def get_samples(
         )
         model_trace = trace(cond_model).get_trace()
         sample = {
-            "theta": jnp.stack(
-                [model_trace[name]["value"] for name in params_name], axis=-1
-            ),
+            "theta": jnp.stack([model_trace[name]["value"] for name in params_name], axis=-1),
             "y": model_trace["y"]["value"],
-            "z": model_trace["z"]["value"]
+            "z": model_trace["z"]["value"],
         }
 
         if score_type == "density":
@@ -94,11 +80,7 @@ def get_samples(
             logp = 0
 
         if with_noise:
-            logp += (
-                model_trace["y"]["fn"]
-                .log_prob(jax.lax.stop_gradient(model_trace["y"]["value"]))
-                .sum()
-            )
+            logp += model_trace["y"]["fn"].log_prob(jax.lax.stop_gradient(model_trace["y"]["value"])).sum()
         logp += model_trace["z"]["fn"].log_prob(model_trace["z"]["value"]).sum()
 
         return logp, sample
@@ -112,13 +94,10 @@ def get_samples(
         @jax.vmap
         def get_params(key):
             model_trace = trace(seed(model, key)).get_trace()
-            thetas = jnp.stack(
-                [model_trace[name]["value"] for name in params_name], axis=-1
-            )
+            thetas = jnp.stack([model_trace[name]["value"] for name in params_name], axis=-1)
             return thetas
 
         thetas = get_params(keys)
 
-    #return jax.vmap(jax.value_and_grad(log_prob_fn, has_aux=True))(thetas, keys)
+    # return jax.vmap(jax.value_and_grad(log_prob_fn, has_aux=True))(thetas, keys)
     return jax.vmap(log_prob_fn)(thetas, keys)
-

@@ -13,18 +13,17 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import jax_cosmo as jc
 import numpy as np
 from flax import nnx
-from tqdm import tqdm
-
-import jax_cosmo as jc
 from numpyro.handlers import condition, seed, trace
 from sbi_lens.config import config_lsst_y_10
 from sbi_lens.simulator.LogNormal_field import lensingLogNormal
+from tqdm import tqdm
 
 from jade.flow import Denoiser
-from jade.init import THETA_MEAN, THETA_STD, FIELD_MEAN, FIELD_STD
-from jade.nn_hybrid import JADE_B_16
+from jade.init import FIELD_MEAN, FIELD_STD, THETA_MEAN, THETA_STD
+from jade.nn import JADE_B_16
 from jade.paths import FIGURES_DIR, MCMC_REF_DIR, checkpoint_dir
 from jade.sampling import HeunSampler
 from jade.utils import load_model
@@ -92,8 +91,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ckpt", default=str(checkpoint_dir()))
     parser.add_argument("--ckpt-tag", default="JADE_B_16_latest")
-    parser.add_argument("--num-steps", type=int, default=200,
-                        help="Heun steps; each costs 2 network evaluations.")
+    parser.add_argument("--num-steps", type=int, default=200, help="Heun steps; each costs 2 network evaluations.")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-batches", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
@@ -110,8 +108,7 @@ def main():
 
     with open(os.path.join(args.mcmc_dir, "mcmc_log_obs_truth.pkl"), "rb") as f:
         ref = pickle.load(f)
-    with open(os.path.join(args.mcmc_dir,
-                           "mcmc_log_posterior_samples.pkl"), "rb") as f:
+    with open(os.path.join(args.mcmc_dir, "mcmc_log_posterior_samples.pkl"), "rb") as f:
         mcmc_samples = pickle.load(f)
 
     obs = ref["y"]

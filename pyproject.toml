@@ -45,4 +45,15 @@ mira-score = { path = "../mira-score", editable = true }
 [dependency-groups]
 dev = [
     "ipykernel>=7.1.0",
+    "ruff>=0.14",
 ]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# E501 caps the line length that the formatter only targets, F catches unused
+# and undefined names, I sorts imports. isort leaves train.py's environment
+# variables above its second import block, so setting JAX_PLATFORMS before
+# importing jax still works.
+select = ["E501", "F", "I"]

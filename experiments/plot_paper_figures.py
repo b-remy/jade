@@ -14,28 +14,29 @@ import itertools
 import os
 
 import astropy.units as u
-import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import numpy as np
+from getdist import MCSamples, plots
+from lenstools import ConvergenceMap
 from matplotlib.ticker import LogLocator, MaxNLocator, NullFormatter
 from scipy.stats import gaussian_kde
 from tqdm import tqdm
-
-from lenstools import ConvergenceMap
-from getdist import MCSamples, plots
 
 from jade.paths import FIGURES_DIR
 
 # Computer Modern for anything inside $...$, bundled with matplotlib, so the
 # labels match pdflatex without a system TeX install.
-mpl.rcParams.update({
-    "font.family": "serif",
-    "font.serif": ["cmr10", "Computer Modern Roman", "DejaVu Serif"],
-    "mathtext.fontset": "cm",
-    "mathtext.rm": "serif",
-    "axes.formatter.use_mathtext": True,
-    "axes.unicode_minus": False,
-})
+mpl.rcParams.update(
+    {
+        "font.family": "serif",
+        "font.serif": ["cmr10", "Computer Modern Roman", "DejaVu Serif"],
+        "mathtext.fontset": "cm",
+        "mathtext.rm": "serif",
+        "axes.formatter.use_mathtext": True,
+        "axes.unicode_minus": False,
+    }
+)
 
 NAMES = [r"$\Omega_c$", r"$\Omega_b$", r"$\sigma_8$", r"$h_0$", r"$n_s$", r"$w_0$"]
 TEX_NAMES = [r"\Omega_c", r"\Omega_b", r"\sigma_8", r"h_0", r"n_s", r"w_0"]
@@ -72,16 +73,16 @@ def compute_ps(map_a, map_b):
     p_cross = []
     for i, j in itertools.combinations(range(N_BINS), 2):
         ell, ps = ConvergenceMap(map_a[:, :, i], angle=MAP_SIZE * u.deg).cross(
-            ConvergenceMap(map_b[:, :, j], angle=MAP_SIZE * u.deg),
-            l_edges=L_EDGES)
+            ConvergenceMap(map_b[:, :, j], angle=MAP_SIZE * u.deg), l_edges=L_EDGES
+        )
         p_cross.append(ps)
     ps_cross = fill_lower_diag(np.array(p_cross), len(L_EDGES) - 1)
 
     ps_auto = []
     for i in range(N_BINS):
         ell, pi = ConvergenceMap(map_a[:, :, i], angle=MAP_SIZE * u.deg).cross(
-            ConvergenceMap(map_b[:, :, i], angle=MAP_SIZE * u.deg),
-            l_edges=L_EDGES)
+            ConvergenceMap(map_b[:, :, i], angle=MAP_SIZE * u.deg), l_edges=L_EDGES
+        )
         ps_auto.append(pi)
     return ell, np.array(ps_auto), ps_cross
 
@@ -97,8 +98,7 @@ def style_triangle_axes(ax, log_x=True):
 def fig_contours(d, out_dir):
     """Figure 5."""
     mcmc = MCSamples(samples=d["mcmc_samples"], names=NAMES, label="MCMC")
-    jade = MCSamples(samples=d["theta_samples"], names=NAMES,
-                     label="JADE (our work)")
+    jade = MCSamples(samples=d["theta_samples"], names=NAMES, label="JADE (our work)")
 
     g = plots.get_subplot_plotter()
     g.settings.axes_fontsize = 34
@@ -127,8 +127,7 @@ def fig_contours(d, out_dir):
     for row in g.subplots:
         for ax in row:
             if ax is not None:
-                ax.tick_params(axis="both", which="major", labelsize=28,
-                               length=8, width=1.2)
+                ax.tick_params(axis="both", which="major", labelsize=28, length=8, width=1.2)
                 ax.tick_params(axis="both", which="minor", length=4, width=1.0)
 
     for ext in ("png", "pdf"):
@@ -151,23 +150,29 @@ def fig_joint_samples(d, out_dir, n_instances=2):
 
     fig = plt.figure(figsize=(14, 2.5 * (n_instances + 2)))
     gs = fig.add_gridspec(
-        n_instances + 2, N_BINS + 2,
-        width_ratios=[0.1, 0.6] + [1] * N_BINS, hspace=0.0, wspace=0.0,
+        n_instances + 2,
+        N_BINS + 2,
+        width_ratios=[0.1, 0.6] + [1] * N_BINS,
+        hspace=0.0,
+        wspace=0.0,
     )
 
     def row_label(row, text):
         ax = fig.add_subplot(gs[row, 0])
         ax.axis("off")
-        ax.text(0.5, 0.5, text, fontsize=16, ha="center", va="center",
-                rotation=90)
+        ax.text(0.5, 0.5, text, fontsize=16, ha="center", va="center", rotation=90)
 
     def theta_column(row, values):
         ax = fig.add_subplot(gs[row, 1])
         ax.axis("off")
-        ax.text(0.5, 0.5,
-                "\n".join(f"${TEX_NAMES[i]}$: {float(values[i]):.3f}"
-                          for i in range(6)),
-                fontsize=14, ha="center", va="center")
+        ax.text(
+            0.5,
+            0.5,
+            "\n".join(f"${TEX_NAMES[i]}$: {float(values[i]):.3f}" for i in range(6)),
+            fontsize=14,
+            ha="center",
+            va="center",
+        )
 
     # Row 0: the noisy observation, on its own colour scale per bin.
     obs_axes = []
@@ -194,8 +199,7 @@ def fig_joint_samples(d, out_dir, n_instances=2):
         theta_column(n + 2, theta[n])
         for c in range(N_BINS):
             ax = fig.add_subplot(gs[n + 2, c + 2])
-            im = ax.imshow(kappa[n, ..., c], cmap=cmap,
-                           vmin=vmin[c], vmax=vmax[c])
+            im = ax.imshow(kappa[n, ..., c], cmap=cmap, vmin=vmin[c], vmax=vmax[c])
             ax.axis("off")
             if n == n_instances - 1:
                 last_axes.append((ax, im))
@@ -215,15 +219,13 @@ def fig_joint_samples(d, out_dir, n_instances=2):
         cbar = plt.colorbar(im, cax=cax, orientation="horizontal")
         cbar.ax.tick_params(labelsize=12)
 
-    save(fig, out_dir, "joint_posterior_samples",
-         bbox_inches="tight", pad_inches=0)
+    save(fig, out_dir, "joint_posterior_samples", bbox_inches="tight", pad_inches=0)
 
 
 def spectra(d, n_samples):
     """Truth spectra and the per-draw posterior spectra."""
     kappa = d["kappa_samples"]
-    ell, ps_auto, ps_cross = compute_ps(d["reference_field"],
-                                        d["reference_field"])
+    ell, ps_auto, ps_cross = compute_ps(d["reference_field"], d["reference_field"])
 
     n = min(n_samples, len(kappa))
     auto, cross = [], []
@@ -245,8 +247,7 @@ def _triangle_grid(plot_diag, plot_off, ylabel, out_dir, name, log_y):
                 ax[i, j].set_xscale("log")
                 if log_y:
                     ax[i, j].set_yscale("log")
-                    ax[i, j].yaxis.set_major_locator(
-                        LogLocator(base=10.0, numticks=4))
+                    ax[i, j].yaxis.set_major_locator(LogLocator(base=10.0, numticks=4))
                     ax[i, j].yaxis.set_minor_formatter(NullFormatter())
                 else:
                     ax[i, j].yaxis.set_major_locator(MaxNLocator(nbins=4))
@@ -264,8 +265,7 @@ def _triangle_grid(plot_diag, plot_off, ylabel, out_dir, name, log_y):
     fig.supxlabel(r"$\ell$", fontsize=FONTSIZE_TEXT)
     fig.supylabel(ylabel, fontsize=FONTSIZE_TEXT, x=-0.02)
     handles, labels = ax[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper right", bbox_to_anchor=(0.88, 0.88),
-               fontsize=FONTSIZE_LEGEND)
+    fig.legend(handles, labels, loc="upper right", bbox_to_anchor=(0.88, 0.88), fontsize=FONTSIZE_LEGEND)
     save(fig, out_dir, name, bbox_inches="tight", pad_inches=0.05)
 
 
@@ -277,20 +277,18 @@ def fig_power_spectra(ell, ps_auto, ps_cross, auto, cross, out_dir):
     def diag(ax, i, _j):
         ax.plot(ell, ps_auto[i], label="Ground truth", color="k", alpha=1.0)
         ax.plot(ell, a_mean[i], color="tab:blue", label="JADE samples")
-        ax.fill_between(ell, a_mean[i] - a_std[i], a_mean[i] + a_std[i],
-                        color="tab:blue", alpha=0.3)
+        ax.fill_between(ell, a_mean[i] - a_std[i], a_mean[i] + a_std[i], color="tab:blue", alpha=0.3)
         ax.set_xlim(ell.min(), ell.max())
 
     def off(ax, i, j):
         ax.plot(ell, ps_cross[:, i, j], color="k")
         ax.plot(ell, c_mean[:, i, j], color="tab:blue", alpha=1.0)
-        ax.fill_between(ell, c_mean[:, i, j] - c_std[:, i, j],
-                        c_mean[:, i, j] + c_std[:, i, j],
-                        color="tab:blue", alpha=0.3)
+        ax.fill_between(
+            ell, c_mean[:, i, j] - c_std[:, i, j], c_mean[:, i, j] + c_std[:, i, j], color="tab:blue", alpha=0.3
+        )
         ax.set_xlim(ell.min(), ell.max())
 
-    _triangle_grid(diag, off, r"$\mathcal{C}_\ell$", out_dir,
-                   "power-spectra-posterior", log_y=True)
+    _triangle_grid(diag, off, r"$\mathcal{C}_\ell$", out_dir, "power-spectra-posterior", log_y=True)
 
     err = (ps_auto - a_mean) / ps_auto
     print("Average relative error per auto bin:")
@@ -313,16 +311,12 @@ def fig_one_point(d, out_dir, n_samples=64):
         grid = np.linspace(lo - pad, hi + pad, 400)
 
         pdf_truth = gaussian_kde(vals)(grid)
-        pdf_samples = np.stack([
-            gaussian_kde(np.asarray(kappa[s, :, :, i]).ravel())(grid)
-            for s in range(n)
-        ])
+        pdf_samples = np.stack([gaussian_kde(np.asarray(kappa[s, :, :, i]).ravel())(grid) for s in range(n)])
         mean, std = pdf_samples.mean(0), pdf_samples.std(0)
 
         ax[i].plot(grid, pdf_truth, color="k", label="Truth")
         ax[i].plot(grid, mean, color="tab:blue", label="JADE samples")
-        ax[i].fill_between(grid, mean - std, mean + std,
-                           color="tab:blue", alpha=0.3)
+        ax[i].fill_between(grid, mean - std, mean + std, color="tab:blue", alpha=0.3)
         ax[i].set_title(f"bin {i}", fontsize=FONTSIZE_TICKS)
         ax[i].tick_params(axis="both", labelsize=FONTSIZE_TICKS)
         ax[i].xaxis.set_major_locator(MaxNLocator(nbins=4))
@@ -332,8 +326,9 @@ def fig_one_point(d, out_dir, n_samples=64):
     fig.supxlabel(r"$\kappa$", fontsize=FONTSIZE_TICKS, y=-0.08)
     fig.supylabel(r"$p(\kappa)$", fontsize=FONTSIZE_TICKS)
     handles, labels = ax[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.08),
-               ncol=len(labels), fontsize=18, frameon=False)
+    fig.legend(
+        handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.08), ncol=len(labels), fontsize=18, frameon=False
+    )
     save(fig, out_dir, "one-point-function", bbox_inches="tight", pad_inches=0)
 
 
@@ -349,23 +344,26 @@ def fig_relative_ps(ell, ps_auto, ps_cross, auto, cross, out_dir):
     def diag(ax, i, _j):
         ax.axhline(0, color="k", alpha=1.0, label="Ground truth")
         ax.plot(ell, a_mean[i], color="tab:blue", label="JADE sample")
-        ax.fill_between(ell, a_mean[i] - a_std[i], a_mean[i] + a_std[i],
-                        color="tab:blue", alpha=0.3)
+        ax.fill_between(ell, a_mean[i] - a_std[i], a_mean[i] + a_std[i], color="tab:blue", alpha=0.3)
         ax.set_xlim(ell.min(), ell.max())
 
     def off(ax, i, j):
         ax.axhline(0, color="k")
         ax.plot(ell, c_mean[:, i, j], color="tab:blue", alpha=1.0)
-        ax.fill_between(ell, c_mean[:, i, j] - c_std[:, i, j],
-                        c_mean[:, i, j] + c_std[:, i, j],
-                        color="tab:blue", alpha=0.3)
+        ax.fill_between(
+            ell, c_mean[:, i, j] - c_std[:, i, j], c_mean[:, i, j] + c_std[:, i, j], color="tab:blue", alpha=0.3
+        )
         ax.set_xlim(ell.min(), ell.max())
 
     _triangle_grid(
-        diag, off,
+        diag,
+        off,
         r"$(\mathcal{C}_\ell^{\rm truth}-\mathcal{C}_\ell^{\rm sample})"
         r"/\mathcal{C}_\ell^{\rm truth}$",
-        out_dir, "power-spectra-posterior-relative", log_y=False)
+        out_dir,
+        "power-spectra-posterior-relative",
+        log_y=False,
+    )
 
 
 def fig_cross_correlation(d, ell, ps_auto, out_dir):
@@ -396,21 +394,18 @@ def fig_cross_correlation(d, ell, ps_auto, out_dir):
     fig.supxlabel(r"$\ell$", fontsize=FONTSIZE_TEXT)
     fig.supylabel(r"$r(\ell)$", fontsize=FONTSIZE_TEXT)
     handles, labels = ax[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.08),
-               ncol=len(labels), fontsize=18, frameon=False)
-    save(fig, out_dir, "cross-correlation-coefficient",
-         bbox_inches="tight", pad_inches=0)
+    fig.legend(
+        handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.08), ncol=len(labels), fontsize=18, frameon=False
+    )
+    save(fig, out_dir, "cross-correlation-coefficient", bbox_inches="tight", pad_inches=0)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--samples", default=str(FIGURES_DIR / "posterior.npz"),
-                        help="Output of sample_posterior.py.")
+    parser.add_argument("--samples", default=str(FIGURES_DIR / "posterior.npz"), help="Output of sample_posterior.py.")
     parser.add_argument("--out-dir", default=str(FIGURES_DIR))
-    parser.add_argument("--ps-samples", type=int, default=64,
-                        help="Posterior draws used for the spectra and PDFs.")
-    parser.add_argument("--diagnostics", action="store_true",
-                        help="Also make the two panels not in the paper.")
+    parser.add_argument("--ps-samples", type=int, default=64, help="Posterior draws used for the spectra and PDFs.")
+    parser.add_argument("--diagnostics", action="store_true", help="Also make the two panels not in the paper.")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)

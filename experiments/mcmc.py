@@ -1,40 +1,25 @@
-import os
 import argparse
-import yaml
+import os
+import pickle
+from functools import partial
 
 import jax
 import jax.numpy as jnp
-
-from flax import nnx
-import orbax.checkpoint as ocp
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-from datasets import load_from_disk
-
-import yaml
-import pickle
-
 import jax_cosmo as jc
-import sbi_lens
-
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
-from numpyro import sample
 from numpyro.handlers import condition, reparam, seed, trace
 from numpyro.infer.reparam import LocScaleReparam, TransformReparam
-
 from sbi_lens.config import config_lsst_y_10
 from sbi_lens.simulator.LogNormal_field import lensingLogNormal
 
-from functools import partial
 
 def main():
     parser = argparse.ArgumentParser(
         description="NUTS reference chain for the Figure 5 comparison. Writes "
-                    "to a fresh directory by default so the committed "
-                    "mcmc_log_normal/ reference is not overwritten."
+        "to a fresh directory by default so the committed "
+        "mcmc_log_normal/ reference is not overwritten."
     )
     parser.add_argument("--out", default="./mcmc_log_normal_traced")
     parser.add_argument("--num-results", type=int, default=3_000)
@@ -48,7 +33,7 @@ def main():
     # sample at Planck15 fiducial cosmology
     cosmo = jc.parameters.Planck15()
 
-    key = jax.random.key(0)    
+    key = jax.random.key(0)
 
     # generate mocked observation
     sigma_e = config_lsst_y_10.sigma_e
@@ -71,10 +56,10 @@ def main():
         a=a,
         b=b,
         z0=z0,
-        model_type='lognormal',
-        lognormal_shifts='LSSTY10',
+        model_type="lognormal",
+        lognormal_shifts="LSSTY10",
         with_noise=with_noise,
-        )
+    )
 
     cond_model = seed(model_log_normal, key)
     cond_model = condition(
@@ -93,21 +78,19 @@ def main():
 
     model_trace = trace(cond_model).get_trace()
     sample = {
-        "theta": jnp.stack(
-            [model_trace[name]["value"] for name in params_name], axis=-1
-        ),
+        "theta": jnp.stack([model_trace[name]["value"] for name in params_name], axis=-1),
         "y": model_trace["y"]["value"],
     }
 
     with open(os.path.join(save_dir, "mcmc_log_obs_truth.pkl"), "wb") as f:
         pickle.dump(sample, f)
-    
+
     obs = sample["y"]
-    
+
     # get reference posterior samples
 
     # initialize from the truth
-    init_values = {k: model_trace[k]['value'] for k in ['z', 'omega_c', 'sigma_8', 'omega_b', 'h_0', 'n_s', 'w_0']}
+    init_values = {k: model_trace[k]["value"] for k in ["z", "omega_c", "sigma_8", "omega_b", "h_0", "n_s", "w_0"]}
 
     num_results = args.num_results
     num_warmup = args.num_warmup
@@ -123,9 +106,9 @@ def main():
     def config(x):
         if type(x["fn"]) is dist.TransformedDistribution:
             return TransformReparam()
-        elif (
-            type(x["fn"]) is dist.Normal or type(x["fn"]) is dist.TruncatedNormal
-        ) and ("decentered" not in x["name"]):
+        elif (type(x["fn"]) is dist.Normal or type(x["fn"]) is dist.TruncatedNormal) and (
+            "decentered" not in x["name"]
+        ):
             return LocScaleReparam(centered=0)
         else:
             return None
@@ -172,9 +155,7 @@ def main():
     print(f"[sim-call tracer] mean leapfrog / iter   : {n_total_calls / n_iters:.1f}")
 
     samples_ = mcmc.get_samples()
-    samples_mcmc = jnp.stack(
-        [samples_[name] for name in params_name], axis=-1
-    )
+    samples_mcmc = jnp.stack([samples_[name] for name in params_name], axis=-1)
 
     diagnostics = {
         "warmup_num_steps": warmup_num_steps,
@@ -188,6 +169,7 @@ def main():
 
     with open(os.path.join(save_dir, "mcmc_log_posterior_samples.pkl"), "wb") as f:
         pickle.dump(samples_mcmc, f)
+
 
 if __name__ == "__main__":
     main()
