@@ -41,7 +41,7 @@ The `tarp` and `mira-score` dependencies are forks, providing the `get_tarp_cove
 
 ## TODO
 
-- [ ] Publish the `tarp` and `mira-score` forks.
+- [ ] Publish the `tarp` and `mira-score` forks (for GPU acceleration).
 
 ## Citation
 
