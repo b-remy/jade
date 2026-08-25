@@ -12,7 +12,7 @@ model:
   attn_drop: 0.0
   proj_drop: 0.0
 training:
-  num_epochs: 500
+  num_epochs: 500   # the run behind the paper stopped at epoch 202
   batch_size: 128
   seed: 42
   use_mixed_precision: true

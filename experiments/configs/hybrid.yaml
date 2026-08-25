@@ -6,7 +6,7 @@ model:
   enable_cond_image: true
   cond_channels: 5
   patch_size: 8
-  cond_patch_size: 16
+  cond_patch_size: 8
   num_cosmo_tokens: 16
   cond_start: 0
   attn_drop: 0.3
@@ -14,8 +14,8 @@ model:
 
 # Training configuration
 training:
-  num_epochs: 1200
-  batch_size: 200
+  num_epochs: 600   # the run behind the paper stopped at epoch 547
+  batch_size: 128
   seed: 42
   use_mixed_precision: true
   precision: "bfloat16"
