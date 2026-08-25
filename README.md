@@ -6,6 +6,11 @@ This repository contains the official implementation of the paper [Joint inferen
   <img src="assets/figure1.png" width="100%">
 </p>
 
+<p align="center">
+  <img src="assets/figure2.png" width="55%">
+  <img src="assets/figure5.png" width="44%">
+</p>
+
 **JADE** is a **J**oint **A**rchitecture for **D**ensity field and cosmology **E**stimates: a transformer denoiser operating in pixel space. The convergence field is split into patches and tokenised; the cosmological parameters are tokenised too; both sets of tokens go through the same transformer layers, so field and cosmology are denoised jointly. That gives a model of the joint distribution, and conditioning the sampler on an observed shear field gives posterior samples $(\theta, \kappa) \sim p(\theta, \kappa \mid \gamma_\mathrm{obs})$ without an explicit or differentiable likelihood.
 
 ## Code
