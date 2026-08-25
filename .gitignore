@@ -25,6 +25,7 @@ mcmc_log_normal_sample/
 *.npz
 *.pdf
 *.png
+!assets/*
 
 # migration scaffolding: A/B checks the reorganized scripts against the exps branch
 experiments/validate.py
