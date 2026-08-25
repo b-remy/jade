@@ -11,7 +11,7 @@ This repository contains the official implementation of the paper [Joint inferen
   <img src="assets/figure5.png" width="44%">
 </p>
 
-**JADE** is a **J**oint **A**rchitecture for **D**ensity field and cosmology **E**stimates: a transformer denoiser operating in pixel space. The convergence field is split into patches and tokenised; the cosmological parameters are tokenised too; both sets of tokens go through the same transformer layers, so field and cosmology are denoised jointly. That gives a model of the joint distribution, and conditioning the sampler on an observed shear field gives posterior samples $(\theta, \kappa) \sim p(\theta, \kappa \mid \gamma_\mathrm{obs})$ without an explicit or differentiable likelihood.
+**JADE** is a **J**oint **A**rchitecture for fiel**D** and cosmological parameter **E**stimation: a transformer denoiser operating in pixel space. The convergence field is split into patches and tokenised; the cosmological parameters are tokenised too; both sets of tokens go through the same transformer layers, so field and cosmology are denoised jointly. That gives a model of the joint distribution, and conditioning the sampler on an observed shear field gives posterior samples $(\theta, \kappa) \sim p(\theta, \kappa \mid \gamma_\mathrm{obs})$ without an explicit or differentiable likelihood.
 
 ## Code
 
@@ -42,6 +42,7 @@ The `tarp` and `mira-score` dependencies are forks, providing the `get_tarp_cove
 ## TODO
 
 - [ ] Publish the `tarp` and `mira-score` forks (for GPU acceleration).
+- [ ] Automate the installation of `sbi_lens`, `lenstools` and `jax-cosmo`, which currently have to be checked out next to this repository.
 
 ## Citation
 
