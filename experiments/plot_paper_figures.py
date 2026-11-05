@@ -211,7 +211,7 @@ def fig_joint_samples(d, out_dir, n_instances=2):
         cbar.ax.tick_params(labelsize=12)
         cax.xaxis.set_ticks_position("top")
         cax.xaxis.set_label_position("top")
-        cax.set_title(f"Bin {c}", fontsize=14, pad=10)
+        cax.set_title(f"Bin {c + 1}", fontsize=14, pad=10)
 
     for ax, im in last_axes:
         pos = ax.get_position()
@@ -293,7 +293,7 @@ def fig_power_spectra(ell, ps_auto, ps_cross, auto, cross, out_dir):
     err = (ps_auto - a_mean) / ps_auto
     print("Average relative error per auto bin:")
     for i, e in enumerate(np.mean(np.abs(err), axis=1)):
-        print(f"  bin {i}: {e:.4f}")
+        print(f"  bin {i + 1}: {e:.4f}")
     print(f"Overall average relative error (auto): {np.mean(np.abs(err)):.4f}")
 
 
@@ -317,7 +317,7 @@ def fig_one_point(d, out_dir, n_samples=64):
         ax[i].plot(grid, pdf_truth, color="k", label="Truth")
         ax[i].plot(grid, mean, color="tab:blue", label="JADE samples")
         ax[i].fill_between(grid, mean - std, mean + std, color="tab:blue", alpha=0.3)
-        ax[i].set_title(f"bin {i}", fontsize=FONTSIZE_TICKS)
+        ax[i].set_title(f"bin {i + 1}", fontsize=FONTSIZE_TICKS)
         ax[i].tick_params(axis="both", labelsize=FONTSIZE_TICKS)
         ax[i].xaxis.set_major_locator(MaxNLocator(nbins=4))
         ax[i].yaxis.set_major_locator(MaxNLocator(nbins=4))
