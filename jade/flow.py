@@ -20,8 +20,8 @@ class Denoiser(nnx.Module):
         x_pred, cosmo_pred = self.x_pred(xt, cosmot, t, cond=cond, train=train, key=key)
 
         # Compute velocity: v = (x - z) / (1 - t)
-        v_x = (x_pred - xt) / jnp.clip(1.0 - t, a_min=self.t_eps)
-        v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, a_min=self.t_eps)
+        v_x = (x_pred - xt) / jnp.clip(1.0 - t, self.t_eps)
+        v_cosmo = (cosmo_pred - cosmot) / jnp.clip(1.0 - t, self.t_eps)
 
         return v_x, v_cosmo
 
@@ -73,11 +73,11 @@ class FlowLoss(nnx.Module):
             xt, cosmot, t, cond, train, dropout_keys
         )
 
-        vx = (x - xt) / jnp.clip((1 - t[:, None, None, None]), a_min=0.05)
-        vx_pred = (x_pred - xt) / jnp.clip((1 - t[:, None, None, None]), a_min=0.05)
+        vx = (x - xt) / jnp.clip((1 - t[:, None, None, None]), 0.05)
+        vx_pred = (x_pred - xt) / jnp.clip((1 - t[:, None, None, None]), 0.05)
 
-        vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[:, None]), a_min=0.05)
-        vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[:, None]), a_min=0.05)
+        vcosmo = (cosmo - cosmot) / jnp.clip((1 - t[:, None]), 0.05)
+        vcosmo_pred = (cosmo_pred - cosmot) / jnp.clip((1 - t[:, None]), 0.05)
 
         loss_x = jnp.mean((vx - vx_pred) ** 2, axis=(-1, -2, -3))
         loss_cosmo = jnp.mean((vcosmo - vcosmo_pred) ** 2, axis=-1)
